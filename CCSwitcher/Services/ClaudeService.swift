@@ -142,14 +142,13 @@ final class ClaudeService: Sendable {
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
 
         log.debug("[getUsageLimits] REQUEST URL: \(url.absoluteString)")
-        log.debug("[getUsageLimits] REQUEST HEADERS: \(request.allHTTPHeaderFields ?? [:])")
 
         let (responseData, response) = try await URLSession.shared.data(for: request)
         let httpResponse = response as? HTTPURLResponse
         guard httpResponse?.statusCode == 200 else {
             let responseString = String(data: responseData, encoding: .utf8) ?? ""
-            log.error("[getUsageLimits] HTTP \(httpResponse?.statusCode ?? 0) Error Response: \(responseString)")
-            
+            log.error("[getUsageLimits] HTTP \(httpResponse?.statusCode ?? 0)")
+
             if httpResponse?.statusCode == 401 || responseString.contains("token_expired") {
                 throw UsageError.expired
             }
@@ -319,8 +318,8 @@ final class ClaudeService: Sendable {
                         log.debug("[runClaude] Success (exit 0), output length: \(output.count)")
                         continuation.resume(returning: output)
                     } else {
-                        log.error("[runClaude] Failed (exit \(process.terminationStatus)), output: \(output.prefix(200))")
-                        continuation.resume(throwing: ClaudeServiceError.cliError(output))
+                        log.error("[runClaude] Failed (exit \(process.terminationStatus))")
+                        continuation.resume(throwing: ClaudeServiceError.cliError("exit \(process.terminationStatus)"))
                     }
                 } catch {
                     log.error("[runClaude] Process launch failed: \(error.localizedDescription)")

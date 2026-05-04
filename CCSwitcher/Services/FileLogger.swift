@@ -1,8 +1,8 @@
 import Foundation
 
-/// Drop-in replacement for os.Logger that writes to ~/Library/Logs/CCSwitcher.log.
+/// Drop-in replacement for os.Logger that writes to ~/Library/Logs/CCSwitcher-app.log.
 /// Usage: `let log = FileLog("Category"); log.info("message")`
-/// Read logs: `cat ~/Library/Logs/CCSwitcher.log` or `tail -f ~/Library/Logs/CCSwitcher.log`
+/// Read logs: `cat ~/Library/Logs/CCSwitcher-app.log` or `tail -f ~/Library/Logs/CCSwitcher-app.log`
 struct FileLog: Sendable {
     private static let shared = FileLogWriter()
     private let category: String
@@ -24,7 +24,12 @@ private final class FileLogWriter: @unchecked Sendable {
 
     init() {
         let logsDir = NSHomeDirectory() + "/Library/Logs"
-        let path = logsDir + "/CCSwitcher.log"
+        let path = logsDir + "/CCSwitcher-app.log"
+
+        // Remove the legacy log file from versions <= 1.4.4, which may contain
+        // an Authorization Bearer token captured by the old getUsageLimits log
+        // (see GitHub issue #11). Best-effort; ignore errors if it doesn't exist.
+        try? FileManager.default.removeItem(atPath: logsDir + "/CCSwitcher.log")
 
         dateFormatter = ISO8601DateFormatter()
         dateFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
