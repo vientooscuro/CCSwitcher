@@ -6,6 +6,15 @@
   <a href="README.fr.md"><img src="https://img.shields.io/badge/Français-gray" alt="Français"></a>
 </p>
 
+<p align="center">
+  <a href="https://github.com/XueshiQiao/CCSwitcher/actions/workflows/build.yml"><img src="https://img.shields.io/github/actions/workflow/status/XueshiQiao/CCSwitcher/build.yml?branch=main&label=build" alt="Build Status"></a>
+  <a href="https://github.com/XueshiQiao/CCSwitcher/releases/latest"><img src="https://img.shields.io/github/v/release/XueshiQiao/CCSwitcher?label=release&color=blue" alt="Latest Release"></a>
+  <a href="https://github.com/XueshiQiao/CCSwitcher/releases"><img src="https://img.shields.io/github/downloads/XueshiQiao/CCSwitcher/total?label=downloads&color=brightgreen" alt="Downloads"></a>
+  <a href="https://github.com/XueshiQiao/homebrew-tap"><img src="https://img.shields.io/badge/homebrew-ccswitcher-FBB040?logo=homebrew&logoColor=white" alt="Homebrew"></a>
+  <img src="https://img.shields.io/badge/macOS-14.0%2B-000000?logo=apple&logoColor=white" alt="macOS 14.0+">
+  <img src="https://img.shields.io/badge/Swift-6.0-F05138?logo=swift&logoColor=white" alt="Swift 6.0">
+</p>
+
 # CCSwitcher
 
 CCSwitcher is a lightweight, pure menu bar macOS application designed to help developers seamlessly manage and switch between multiple Claude Code accounts. It monitors API usage, gracefully handles background token refreshes, and circumvents common macOS menu bar app limitations.

@@ -136,10 +136,46 @@ jobs:
           name: CCSwitcher-macOS
           path: build/Release/CCSwitcher.dmg
 
+      - name: Generate latest.json
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}/CCSwitcher.dmg"
+
+          cat > build/Release/latest.json <<EOF
+          {
+            "version": "$VERSION",
+            "notes": "",
+            "pub_date": "$PUB_DATE",
+            "platforms": {
+              "darwin-aarch64": {
+                "signature": "",
+                "url": "$DOWNLOAD_URL"
+              },
+              "darwin-x86_64": {
+                "signature": "",
+                "url": "$DOWNLOAD_URL"
+              }
+            }
+          }
+          EOF
+
       - name: Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/v')
         with:
-          files: build/Release/CCSwitcher.dmg
+          files: |
+            build/Release/CCSwitcher.dmg
+            build/Release/latest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Trigger Homebrew Tap Update
+        if: startsWith(github.ref, 'refs/tags/v') && success()
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.HOMEBREW_TAP_PAT }}
+          repository: XueshiQiao/homebrew_tap
+          event-type: update_cask
+          client-payload: '{"app_token": "ccswitcher"}'
