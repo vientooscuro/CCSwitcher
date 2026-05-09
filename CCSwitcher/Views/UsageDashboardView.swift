@@ -75,6 +75,10 @@ struct UsageDashboardView: View {
                 }
             }
             .padding(.vertical, 12)
+            // Report this VStack's intrinsic height to MainMenuView so it can
+            // size the popover frame to fit the Usage tab's content exactly.
+            // See MainMenuView.swift for the measurement contract.
+            .measureUsageContentHeight()
         }
     }
 
