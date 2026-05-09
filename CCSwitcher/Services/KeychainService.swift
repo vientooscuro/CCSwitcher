@@ -201,7 +201,7 @@ actor KeychainService {
 
     // MARK: - App Keychain operations (Backups)
 
-    private let appBackupService = "me.xueshi.ccswitcher.backups"
+    private let appBackupService = "com.vientooscuro.ccswitcher.backups"
     private let appBackupAccount = "all-accounts"
 
     private func loadBackupStore() -> [String: AccountBackup] {

@@ -6,7 +6,7 @@
 	<true/>
 	<key>com.apple.security.application-groups</key>
 	<array>
-		<string>group.me.xueshi.ccswitcher</string>
+		<string>group.com.vientooscuro.ccswitcher</string>
 	</array>
 </dict>
 </plist>
