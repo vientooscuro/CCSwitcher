@@ -144,17 +144,17 @@ struct MainMenuView: View {
     /// Popover height is driven by measured Usage tab content + measured chrome.
     /// The Usage tab is chosen as the height reference because it's the
     /// content-heaviest tab; sizing for it gives other tabs enough headroom.
-    /// Clamped to a minimum (for a reasonable floor) and a screen-aware maximum
-    /// (so the popover never exceeds the available screen space).
+    /// Capped only by available screen space; no artificial floor — the popover
+    /// matches its content exactly, so there is no padding gap inside the
+    /// ScrollView when content is short.
     private var popoverHeight: CGFloat {
-        let minHeight: CGFloat = 520
         let screenCap: CGFloat = (NSScreen.main?.visibleFrame.height ?? 900) - 100
         let maxHeight: CGFloat = min(900, screenCap)
 
         // +1 for the Divider between content and footer (not measured).
         let desired = chromeHeight + usageContentHeight + 1
 
-        return min(maxHeight, max(minHeight, desired))
+        return min(maxHeight, desired)
     }
 
     // MARK: - Promo Banner
