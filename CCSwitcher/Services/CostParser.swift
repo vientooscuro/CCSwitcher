@@ -3,10 +3,24 @@ import Foundation
 private let log = FileLog("CostParser")
 
 /// Parses Claude Code session JSONL files to calculate token costs.
-final class CostParser: Sendable {
+///
+/// Memory strategy:
+///   1. Files are streamed line-by-line via `JSONLStreamReader` — never loaded whole.
+///   2. Each line is decoded with `JSONDecoder` into a typed struct (no NSDictionary bridging).
+///   3. Per-file results are cached by (mtime, size); unchanged files are skipped on re-runs.
+///   4. The whole pass runs inside an `autoreleasepool` so transient buffers drain immediately.
+actor CostParser {
     static let shared = CostParser()
 
     private let claudeDir: String
+
+    /// Per-file cache. Key = absolute file path.
+    /// Value = (signature, deduped requestId → TokenUsage).
+    private struct FileCacheEntry {
+        let signature: JSONLStreamReader.FileSignature
+        let entries: [String: TokenUsage]
+    }
+    private var fileCache: [String: FileCacheEntry] = [:]
 
     private init() {
         self.claudeDir = NSHomeDirectory() + "/.claude"
@@ -15,14 +29,12 @@ final class CostParser: Sendable {
     // MARK: - Public
 
     /// Compute cost summary from all session JSONL files.
-    func getCostSummary() -> CostSummary {
-        let usages = parseAllSessions()
+    func getCostSummary() async -> CostSummary {
+        let usages = await parseAllSessions()
 
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
+        let formatter = Formatters.isoDay
         let todayStr = formatter.string(from: Date())
 
-        // Group by date
         var dateGroups: [String: [TokenUsage]] = [:]
         var dateSessionFiles: [String: Set<String>] = [:]
         for usage in usages {
@@ -31,7 +43,6 @@ final class CostParser: Sendable {
             dateSessionFiles[dateStr, default: []].insert(usage.sessionFile)
         }
 
-        // Build daily costs
         var dailyCosts: [DailyCost] = []
         for (date, usages) in dateGroups {
             var modelCosts: [String: Double] = [:]
@@ -47,10 +58,16 @@ final class CostParser: Sendable {
                 totalCacheRead += u.cacheReadTokens
             }
 
+            // Pre-sort once per day; views read this without re-sorting.
+            let sorted = modelCosts
+                .map { (model: $0.key, cost: $0.value) }
+                .sorted { $0.cost > $1.cost }
+
             dailyCosts.append(DailyCost(
                 date: date,
                 totalCost: modelCosts.values.reduce(0, +),
                 modelBreakdown: modelCosts,
+                sortedBreakdown: sorted,
                 sessionCount: dateSessionFiles[date]?.count ?? 0,
                 inputTokens: totalInput,
                 outputTokens: totalOutput,
@@ -59,84 +76,118 @@ final class CostParser: Sendable {
             ))
         }
 
-        dailyCosts.sort { $0.date > $1.date } // newest first
+        dailyCosts.sort { $0.date > $1.date }
 
         let todayCost = dailyCosts.first(where: { $0.date == todayStr })?.totalCost ?? 0
 
-        log.info("[getCostSummary] Parsed \(usages.count) usage entries, \(dailyCosts.count) days, today=$\(String(format: "%.2f", todayCost))")
+        log.info("[getCostSummary] Parsed \(usages.count) entries, \(dailyCosts.count) days, today=$\(String(format: "%.2f", todayCost)), cache=\(self.fileCache.count) files")
         return CostSummary(todayCost: todayCost, dailyCosts: dailyCosts)
     }
 
     // MARK: - Parsing
 
-    /// Parse all session JSONL files, deduplicating by requestId to avoid
-    /// counting streaming updates multiple times for the same API call.
-    private func parseAllSessions() -> [TokenUsage] {
-        let projectsDir = claudeDir + "/projects"
-        let fm = FileManager.default
+    /// Streaming JSONL decoder model. Only the fields we need.
+    private struct LineEntry: Decodable {
+        let type: String?
+        let timestamp: String?
+        let requestId: String?
+        let message: Message?
 
-        guard let projectDirs = try? fm.contentsOfDirectory(atPath: projectsDir) else {
-            log.warning("[parseAllSessions] Cannot read projects directory")
-            return []
+        struct Message: Decodable {
+            let model: String?
+            let usage: Usage?
         }
+        struct Usage: Decodable {
+            let input_tokens: Int?
+            let output_tokens: Int?
+            /// Legacy aggregate (5m + 1h). Kept for backwards compat with
+            /// older JSONL records that don't have the `cache_creation`
+            /// breakdown.
+            let cache_creation_input_tokens: Int?
+            let cache_read_input_tokens: Int?
+            /// Modern breakdown — present in current Claude Code logs.
+            let cache_creation: CacheCreation?
 
+            struct CacheCreation: Decodable {
+                let ephemeral_5m_input_tokens: Int?
+                let ephemeral_1h_input_tokens: Int?
+            }
+        }
+    }
+
+    private func parseAllSessions() async -> [TokenUsage] {
+        // Single shared directory walk + signature gather (also used by ActivityParser).
+        let entries = await JSONLDirectoryIndex.shared.entries()
+        let decoder = JSONDecoder()
         var allUsages: [TokenUsage] = []
-        let isoFormatter = ISO8601DateFormatter()
-        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var visited: Set<String> = []
+        visited.reserveCapacity(entries.count)
 
-        let isoFallback = ISO8601DateFormatter()
-        isoFallback.formatOptions = [.withInternetDateTime]
+        for entry in entries {
+            visited.insert(entry.path)
+            let sessionFile = String(entry.fileName.dropLast(".jsonl".count))
 
-        for projectDir in projectDirs {
-            let projectPath = projectsDir + "/" + projectDir
-            guard let files = try? fm.contentsOfDirectory(atPath: projectPath) else { continue }
+            // Cache hit — skip parsing entirely.
+            if let cached = fileCache[entry.path], cached.signature == entry.signature {
+                allUsages.append(contentsOf: cached.entries.values)
+                continue
+            }
 
-            for file in files where file.hasSuffix(".jsonl") {
-                let filePath = projectPath + "/" + file
-                let sessionFile = file.replacingOccurrences(of: ".jsonl", with: "")
-                guard let data = fm.contents(atPath: filePath),
-                      let content = String(data: data, encoding: .utf8) else { continue }
+            var requestEntries: [String: TokenUsage] = [:]
 
-                // Deduplicate: keep only the last entry per requestId.
-                // Streaming creates multiple assistant entries with the same requestId;
-                // the last one has the final (correct) token counts.
-                var requestEntries: [String: TokenUsage] = [:]
-
-                for line in content.components(separatedBy: .newlines) {
-                    guard !line.isEmpty else { continue }
+            autoreleasepool {
+                JSONLStreamReader.forEachLine(path: entry.path) { line in
                     guard let lineData = line.data(using: .utf8),
-                          let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else { continue }
+                          let parsed = try? decoder.decode(LineEntry.self, from: lineData),
+                          parsed.type == "assistant",
+                          let message = parsed.message,
+                          let model = message.model,
+                          let usage = message.usage,
+                          let timestampStr = parsed.timestamp,
+                          let requestId = parsed.requestId else { return }
 
-                    guard let type = obj["type"] as? String, type == "assistant",
-                          let message = obj["message"] as? [String: Any],
-                          let model = message["model"] as? String,
-                          let usage = message["usage"] as? [String: Any],
-                          let timestampStr = obj["timestamp"] as? String,
-                          let requestId = obj["requestId"] as? String else { continue }
+                    guard ModelPricing.forModel(model) != nil else { return }
 
-                    // Skip synthetic/unknown models
-                    guard ModelPricing.forModel(model) != nil else { continue }
-
-                    let timestamp = isoFormatter.date(from: timestampStr)
-                        ?? isoFallback.date(from: timestampStr)
+                    let timestamp = Formatters.isoFractional.date(from: timestampStr)
+                        ?? Formatters.iso.date(from: timestampStr)
                         ?? Date()
 
-                    let tokenUsage = TokenUsage(
-                        inputTokens: usage["input_tokens"] as? Int ?? 0,
-                        outputTokens: usage["output_tokens"] as? Int ?? 0,
-                        cacheWriteTokens: usage["cache_creation_input_tokens"] as? Int ?? 0,
-                        cacheReadTokens: usage["cache_read_input_tokens"] as? Int ?? 0,
+                    // Cache write breakdown: prefer the new sub-object; if
+                    // absent (older logs), fall back to the legacy aggregate
+                    // and treat it as 5-minute (the only tier that existed
+                    // before the 1-hour tier shipped).
+                    let cc = usage.cache_creation
+                    let tokens5m: Int
+                    let tokens1h: Int
+                    if let cc {
+                        tokens5m = cc.ephemeral_5m_input_tokens ?? 0
+                        tokens1h = cc.ephemeral_1h_input_tokens ?? 0
+                    } else {
+                        tokens5m = usage.cache_creation_input_tokens ?? 0
+                        tokens1h = 0
+                    }
+
+                    // Last entry per requestId wins (streaming → final counts).
+                    requestEntries[requestId] = TokenUsage(
+                        inputTokens: usage.input_tokens ?? 0,
+                        outputTokens: usage.output_tokens ?? 0,
+                        cacheWrite5mTokens: tokens5m,
+                        cacheWrite1hTokens: tokens1h,
+                        cacheReadTokens: usage.cache_read_input_tokens ?? 0,
                         model: model,
                         timestamp: timestamp,
                         sessionFile: sessionFile
                     )
-
-                    // Always overwrite — last entry for this requestId wins
-                    requestEntries[requestId] = tokenUsage
                 }
-
-                allUsages.append(contentsOf: requestEntries.values)
             }
+
+            fileCache[entry.path] = FileCacheEntry(signature: entry.signature, entries: requestEntries)
+            allUsages.append(contentsOf: requestEntries.values)
+        }
+
+        // Drop cache entries for files that no longer exist.
+        if visited.count != fileCache.count {
+            fileCache = fileCache.filter { visited.contains($0.key) }
         }
 
         return allUsages

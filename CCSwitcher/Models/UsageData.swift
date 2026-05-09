@@ -35,11 +35,8 @@ struct UsageWindow: Codable {
 
     var resetsAtDate: Date? {
         guard let resetsAt else { return nil }
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: resetsAt) { return date }
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: resetsAt)
+        return Formatters.isoFractional.date(from: resetsAt)
+            ?? Formatters.iso.date(from: resetsAt)
     }
 
     var resetTimeString: String? {
@@ -51,9 +48,7 @@ struct UsageWindow: Codable {
         let minutes = (Int(remaining) % 3600) / 60
 
         if hours > 24 {
-            let formatter = DateFormatter()
-            formatter.dateFormat = "EEE h:mm a"
-            return formatter.string(from: date)
+            return Formatters.weekdayTime.string(from: date)
         } else if hours > 0 {
             return "\(hours) hr \(minutes) min"
         } else {
@@ -74,67 +69,6 @@ struct ExtraUsage: Codable {
         case usedCredits = "used_credits"
         case utilization
     }
-}
-
-// MARK: - Stats Cache (matches ~/.claude/stats-cache.json)
-
-struct StatsCache: Codable {
-    let version: Int?
-    let lastComputedDate: String?
-    let dailyActivity: [DailyActivity]?
-    let totalSessions: Int?
-    let totalMessages: Int?
-    let longestSession: LongestSession?
-    let firstSessionDate: String?
-    let hourCounts: [String: Int]?
-}
-
-struct DailyActivity: Codable, Identifiable {
-    let date: String
-    let messageCount: Int
-    let sessionCount: Int
-    let toolCallCount: Int
-
-    var id: String { date }
-
-    var parsedDate: Date? {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.date(from: date)
-    }
-}
-
-struct LongestSession: Codable {
-    let sessionId: String?
-    let duration: Int?
-    let messageCount: Int?
-    let timestamp: String?
-}
-
-// MARK: - Computed Usage Summary
-
-struct UsageSummary {
-    let weeklyMessages: Int
-    let weeklySessionCount: Int
-    let weeklyToolCalls: Int
-    let todayMessages: Int
-    let todaySessionCount: Int
-    let todayToolCalls: Int
-    let totalMessages: Int
-    let totalSessions: Int
-    let dailyActivity: [DailyActivity]
-
-    static let empty = UsageSummary(
-        weeklyMessages: 0,
-        weeklySessionCount: 0,
-        weeklyToolCalls: 0,
-        todayMessages: 0,
-        todaySessionCount: 0,
-        todayToolCalls: 0,
-        totalMessages: 0,
-        totalSessions: 0,
-        dailyActivity: []
-    )
 }
 
 // MARK: - Session Info (from ~/.claude/sessions/*.json)

@@ -2,118 +2,107 @@ import Foundation
 
 private let log = FileLog("ActivityParser")
 
-/// Parses Claude Code session JSONL files to extract today's coding activity stats:
-/// conversation turns, active coding time, tool usage, lines written, model usage.
-final class ActivityParser: Sendable {
+/// Parses Claude Code session JSONL files to extract today's coding activity stats.
+///
+/// Memory strategy:
+///   1. Files modified before today's local midnight are skipped via mtime check (no I/O).
+///   2. The remaining files are streamed line-by-line via `JSONLStreamReader`.
+///   3. Each line is decoded with `JSONDecoder` into a typed struct (no NSDictionary bridging).
+///   4. Per-file activity aggregates are cached by (mtime, size); unchanged files are reused.
+///   5. The whole pass runs inside `autoreleasepool` blocks so transient buffers drain immediately.
+actor ActivityParser {
     static let shared = ActivityParser()
 
     private let claudeDir: String
+
+    /// Per-file aggregate. Already filtered to "today" — caching is safe because
+    /// the file signature changes whenever new lines are appended.
+    private struct FileAggregate {
+        let signature: JSONLStreamReader.FileSignature
+        var turns: Int
+        var sessionTimestamps: [String: [Date]]
+        var toolCounts: [String: Int]
+        var linesWritten: Int
+        var modelCounts: [String: Int]
+    }
+    private var fileCache: [String: FileAggregate] = [:]
+    private var cacheDay: String?
 
     private init() {
         self.claudeDir = NSHomeDirectory() + "/.claude"
     }
 
-    func getTodayStats() -> ActivityStats {
-        let projectsDir = claudeDir + "/projects"
-        let fm = FileManager.default
+    // MARK: - Public
 
-        guard let projectDirs = try? fm.contentsOfDirectory(atPath: projectsDir) else {
-            return .empty
-        }
+    func getTodayStats() async -> ActivityStats {
+        let entries = await JSONLDirectoryIndex.shared.entries()
 
-        let isoFormatter = ISO8601DateFormatter()
-        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let isoFallback = ISO8601DateFormatter()
-        isoFallback.formatOptions = [.withInternetDateTime]
-
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy-MM-dd"
+        let dateFormatter = Formatters.isoDay
         let todayStr = dateFormatter.string(from: Date())
 
+        // Reset cache when the day rolls over.
+        if cacheDay != todayStr {
+            fileCache.removeAll(keepingCapacity: false)
+            cacheDay = todayStr
+        }
+
+        // Anything written before today's local midnight cannot contain today's events.
+        let startOfToday = Calendar.current.startOfDay(for: Date())
+        let decoder = JSONDecoder()
+
+        // Aggregated totals (across all files).
         var turns = 0
-        var sessionTimestamps: [String: [Date]] = [:]  // sessionId → timestamps
+        var sessionTimestamps: [String: [Date]] = [:]
         var toolCounts: [String: Int] = [:]
         var linesWritten = 0
         var modelCounts: [String: Int] = [:]
-        var seenRequests: Set<String> = []
+        var visited: Set<String> = []
 
-        for projectDir in projectDirs {
-            let projectPath = projectsDir + "/" + projectDir
-            guard let files = try? fm.contentsOfDirectory(atPath: projectPath) else { continue }
+        for entry in entries {
+            let file = entry.fileName
+            if file.contains("subagent") { continue }
+            if entry.path.contains("/subagents/") { continue }
 
-            for file in files where file.hasSuffix(".jsonl") && !file.contains("subagent") {
-                let filePath = projectPath + "/" + file
-                // Skip subagent files (internal agent-to-agent communication)
-                if filePath.contains("/subagents/") { continue }
-                guard let data = fm.contents(atPath: filePath),
-                      let content = String(data: data, encoding: .utf8) else { continue }
+            // mtime predates today → no events for today possible.
+            if entry.signature.mtime < startOfToday { continue }
 
-                for line in content.components(separatedBy: .newlines) {
-                    guard !line.isEmpty,
-                          let lineData = line.data(using: .utf8),
-                          let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                          let timestampStr = obj["timestamp"] as? String,
-                          let timestamp = isoFormatter.date(from: timestampStr) ?? isoFallback.date(from: timestampStr) else { continue }
+            visited.insert(entry.path)
 
-                    // Filter for today only
-                    guard dateFormatter.string(from: timestamp) == todayStr else { continue }
-
-                    let type = obj["type"] as? String ?? ""
-
-                    // Collect timestamps per session for active time calculation
-                    let sessionId = obj["sessionId"] as? String ?? file
-                    sessionTimestamps[sessionId, default: []].append(timestamp)
-
-                    switch type {
-                    case "user":
-                        // Only count real user input, not tool_result feedback
-                        let message = obj["message"] as? [String: Any]
-                        let content = message?["content"]
-                        if let str = content as? String, !str.isEmpty {
-                            turns += 1
-                        } else if let arr = content as? [[String: Any]] {
-                            let hasToolResult = arr.contains { $0["type"] as? String == "tool_result" }
-                            if !hasToolResult { turns += 1 }
-                        }
-
-                    case "assistant":
-                        guard let message = obj["message"] as? [String: Any] else { continue }
-
-                        // Model usage (deduplicate by requestId)
-                        if let model = message["model"] as? String,
-                           let requestId = obj["requestId"] as? String,
-                           !seenRequests.contains(requestId) {
-                            seenRequests.insert(requestId)
-                            let shortName = CostParser.shortModelName(model)
-                            modelCounts[shortName, default: 0] += 1
-                        }
-
-                        // Tool usage & lines written from content array
-                        if let content = message["content"] as? [[String: Any]] {
-                            for block in content {
-                                guard let blockType = block["type"] as? String,
-                                      blockType == "tool_use",
-                                      let toolName = block["name"] as? String else { continue }
-
-                                toolCounts[toolName, default: 0] += 1
-
-                                // Estimate lines written from Edit/Write tools
-                                if let input = block["input"] as? [String: Any] {
-                                    linesWritten += Self.estimateLines(tool: toolName, input: input)
-                                }
-                            }
-                        }
-
-                    default:
-                        break
-                    }
-                }
+            let aggregate: FileAggregate
+            if let cached = fileCache[entry.path], cached.signature == entry.signature {
+                aggregate = cached
+            } else {
+                aggregate = parseFile(
+                    path: entry.path,
+                    fileName: file,
+                    signature: entry.signature,
+                    todayStr: todayStr,
+                    dateFormatter: dateFormatter,
+                    decoder: decoder
+                )
+                fileCache[entry.path] = aggregate
             }
+
+            // Merge into totals
+            turns += aggregate.turns
+            linesWritten += aggregate.linesWritten
+            for (k, v) in aggregate.toolCounts { toolCounts[k, default: 0] += v }
+            for (sid, dates) in aggregate.sessionTimestamps {
+                sessionTimestamps[sid, default: []].append(contentsOf: dates)
+            }
+            // requestId is unique per JSONL file, so per-file modelCounts
+            // can be summed across files without cross-file dedup.
+            for (k, v) in aggregate.modelCounts { modelCounts[k, default: 0] += v }
+        }
+
+        // Drop stale cache entries (files removed/rotated).
+        if visited.count != fileCache.count {
+            fileCache = fileCache.filter { visited.contains($0.key) }
         }
 
         let activeMinutes = Self.calculateActiveMinutes(from: sessionTimestamps)
 
-        log.info("[getTodayStats] turns=\(turns) active=\(activeMinutes)m tools=\(toolCounts.values.reduce(0,+)) lines=\(linesWritten) models=\(modelCounts)")
+        log.info("[getTodayStats] turns=\(turns) active=\(activeMinutes)m tools=\(toolCounts.values.reduce(0,+)) lines=\(linesWritten) models=\(modelCounts) cache=\(self.fileCache.count) files")
         return ActivityStats(
             conversationTurns: turns,
             activeCodingMinutes: activeMinutes,
@@ -123,28 +112,145 @@ final class ActivityParser: Sendable {
         )
     }
 
+    // MARK: - Per-file parsing
+
+    private func parseFile(
+        path: String,
+        fileName: String,
+        signature: JSONLStreamReader.FileSignature,
+        todayStr: String,
+        dateFormatter: DateFormatter,
+        decoder: JSONDecoder
+    ) -> FileAggregate {
+        var turns = 0
+        var sessionTimestamps: [String: [Date]] = [:]
+        var toolCounts: [String: Int] = [:]
+        var linesWritten = 0
+        var modelCounts: [String: Int] = [:]
+        var seenRequests: Set<String> = []
+
+        autoreleasepool {
+            JSONLStreamReader.forEachLine(path: path) { line in
+                guard let lineData = line.data(using: .utf8),
+                      let entry = try? decoder.decode(ActivityLineEntry.self, from: lineData),
+                      let timestampStr = entry.timestamp,
+                      let timestamp = Formatters.isoFractional.date(from: timestampStr) ?? Formatters.iso.date(from: timestampStr) else { return }
+
+                guard dateFormatter.string(from: timestamp) == todayStr else { return }
+
+                let type = entry.type ?? ""
+                let sessionId = entry.sessionId ?? fileName
+                sessionTimestamps[sessionId, default: []].append(timestamp)
+
+                switch type {
+                case "user":
+                    if let content = entry.message?.content {
+                        switch content {
+                        case .string(let s):
+                            if !s.isEmpty { turns += 1 }
+                        case .blocks(let arr):
+                            let hasToolResult = arr.contains { $0.type == "tool_result" }
+                            if !hasToolResult { turns += 1 }
+                        case .other:
+                            break
+                        }
+                    }
+
+                case "assistant":
+                    guard let message = entry.message else { return }
+
+                    if let model = message.model,
+                       let requestId = entry.requestId,
+                       !seenRequests.contains(requestId) {
+                        seenRequests.insert(requestId)
+                        let shortName = CostParser.shortModelName(model)
+                        modelCounts[shortName, default: 0] += 1
+                    }
+
+                    if case .blocks(let arr) = message.content {
+                        for block in arr where block.type == "tool_use" {
+                            guard let toolName = block.name else { continue }
+                            toolCounts[toolName, default: 0] += 1
+                            if let input = block.input {
+                                linesWritten += Self.estimateLines(tool: toolName, input: input)
+                            }
+                        }
+                    }
+
+                default:
+                    break
+                }
+            }
+        }
+
+        return FileAggregate(
+            signature: signature,
+            turns: turns,
+            sessionTimestamps: sessionTimestamps,
+            toolCounts: toolCounts,
+            linesWritten: linesWritten,
+            modelCounts: modelCounts
+        )
+    }
+
+    // MARK: - Decoder model
+
+    private struct ActivityLineEntry: Decodable {
+        let type: String?
+        let timestamp: String?
+        let sessionId: String?
+        let requestId: String?
+        let message: Message?
+
+        struct Message: Decodable {
+            let model: String?
+            let content: Content?
+        }
+
+        enum Content: Decodable {
+            case string(String)
+            case blocks([Block])
+            case other
+
+            init(from decoder: Decoder) throws {
+                let c = try decoder.singleValueContainer()
+                if let s = try? c.decode(String.self) { self = .string(s); return }
+                if let a = try? c.decode([Block].self) { self = .blocks(a); return }
+                self = .other
+            }
+        }
+
+        struct Block: Decodable {
+            let type: String?
+            let name: String?
+            let input: ToolInput?
+        }
+
+        struct ToolInput: Decodable {
+            let content: String?
+            let new_string: String?
+            let old_string: String?
+        }
+    }
+
     // MARK: - Helpers
 
-    /// Estimate net lines written from a tool call's input parameters.
-    private static func estimateLines(tool: String, input: [String: Any]) -> Int {
+    private static func estimateLines(tool: String, input: ActivityLineEntry.ToolInput) -> Int {
         switch tool {
         case "Write":
-            let content = input["content"] as? String ?? ""
-            return content.components(separatedBy: "\n").count
+            let content = input.content ?? ""
+            return content.split(separator: "\n", omittingEmptySubsequences: false).count
         case "Edit":
-            let newStr = input["new_string"] as? String ?? ""
-            let oldStr = input["old_string"] as? String ?? ""
-            let added = newStr.components(separatedBy: "\n").count
-            let removed = oldStr.components(separatedBy: "\n").count
+            let newStr = input.new_string ?? ""
+            let oldStr = input.old_string ?? ""
+            let added = newStr.split(separator: "\n", omittingEmptySubsequences: false).count
+            let removed = oldStr.split(separator: "\n", omittingEmptySubsequences: false).count
             return max(0, added - removed)
         default:
             return 0
         }
     }
 
-    /// Calculate total active coding minutes across all sessions.
-    /// Each session's active time is calculated independently, then summed.
-    /// Parallel sessions stack — 3 sessions × 30 min = 90 min.
     private static func calculateActiveMinutes(from sessionTimestamps: [String: [Date]]) -> Int {
         let maxGap: TimeInterval = 10 * 60
         let tailPadding: TimeInterval = 2 * 60

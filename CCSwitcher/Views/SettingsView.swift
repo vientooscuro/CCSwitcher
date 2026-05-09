@@ -8,7 +8,6 @@ struct SettingsView: View {
     @AppStorage("refreshInterval") private var refreshInterval: Double = 300
     @AppStorage("showAccountName") private var showAccountName = true
     @AppStorage("showFullEmail") private var showFullEmail = false
-    @AppStorage("showInDock") private var showInDock = false
     @AppStorage("appLanguage") private var appLanguage = "auto"
     @State private var launchAtLogin = false
 

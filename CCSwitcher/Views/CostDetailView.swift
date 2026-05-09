@@ -40,10 +40,12 @@ struct CostDetailView: View {
                 .monospacedDigit()
                 .foregroundStyle(.green)
 
-            if let today, !today.modelBreakdown.isEmpty {
+            if let today, !today.sortedBreakdown.isEmpty {
                 Divider()
                 VStack(spacing: 4) {
-                    ForEach(today.modelBreakdown.sorted(by: { $0.value > $1.value }), id: \.key) { model, cost in
+                    ForEach(today.sortedBreakdown, id: \.model) { entry in
+                        let model = entry.model
+                        let cost = entry.cost
                         HStack {
                             Text(model)
                                 .font(.caption2)
@@ -75,11 +77,9 @@ struct CostDetailView: View {
     private var periodSummaryCards: some View {
         let costs = appState.costSummary.dailyCosts
         let todayStr = todayString()
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
 
-        let last7 = costForLastDays(7, costs: costs, today: todayStr, formatter: formatter)
-        let last30 = costForLastDays(30, costs: costs, today: todayStr, formatter: formatter)
+        let last7 = costForLastDays(7, costs: costs, today: todayStr, formatter: Formatters.isoDay)
+        let last30 = costForLastDays(30, costs: costs, today: todayStr, formatter: Formatters.isoDay)
 
         return HStack(spacing: 10) {
             periodCard(title: "Last 7 Days", cost: last7)
@@ -204,7 +204,7 @@ struct CostDetailView: View {
                 VStack(spacing: 0) {
                     pricingHeader
                     Divider()
-                    ForEach(pricingRows, id: \.model) { row in
+                    ForEach(Self.pricingRows, id: \.model) { row in
                         pricingRow(row)
                         Divider()
                     }
@@ -213,7 +213,7 @@ struct CostDetailView: View {
                 .clipShape(RoundedRectangle(cornerRadius: AppStyle.cardCornerRadius))
                 .overlay(RoundedRectangle(cornerRadius: AppStyle.cardCornerRadius).strokeBorder(.cardBorder, lineWidth: 1))
 
-                Text("Cache write = 5-min tier (1.25× base input). Cache read = 0.1× base input.")
+                Text("Cache write shown for 1-hour tier (2× input) — Claude Code's default. 5-min tier is 1.25× input. Cache read = 0.1× input.")
                     .font(.system(size: 9))
                     .foregroundStyle(.textSecondary)
 
@@ -243,7 +243,7 @@ struct CostDetailView: View {
                 .frame(maxWidth: .infinity, alignment: .trailing)
             Text("Output")
                 .frame(maxWidth: .infinity, alignment: .trailing)
-            Text("Cache W")
+            Text("Cache 1h")
                 .frame(maxWidth: .infinity, alignment: .trailing)
             Text("Cache R")
                 .frame(maxWidth: .infinity, alignment: .trailing)
@@ -262,13 +262,13 @@ struct CostDetailView: View {
         let cacheR: String
     }
 
-    private var pricingRows: [PricingRowData] {
-        [
-            PricingRowData(model: "Opus 4.6", input: "$5", output: "$25", cacheW: "$6.25", cacheR: "$0.50"),
-            PricingRowData(model: "Sonnet 4.6", input: "$3", output: "$15", cacheW: "$3.75", cacheR: "$0.30"),
-            PricingRowData(model: "Haiku 4.5", input: "$1", output: "$5", cacheW: "$1.25", cacheR: "$0.10"),
-        ]
-    }
+    /// Static — never changes. The previous computed property allocated a
+    /// fresh array on every body invalidation.
+    private static let pricingRows: [PricingRowData] = [
+        PricingRowData(model: "Opus 4.7", input: "$5", output: "$25", cacheW: "$10", cacheR: "$0.50"),
+        PricingRowData(model: "Sonnet 4.6", input: "$3", output: "$15", cacheW: "$6", cacheR: "$0.30"),
+        PricingRowData(model: "Haiku 4.5", input: "$1", output: "$5", cacheW: "$2", cacheR: "$0.10"),
+    ]
 
     private func pricingRow(_ row: PricingRowData) -> some View {
         HStack(spacing: 0) {
@@ -292,11 +292,7 @@ struct CostDetailView: View {
     // MARK: - Helpers
 
     private func formatCost(_ cost: Double) -> String {
-        if cost >= 1 {
-            return String(format: "$%.2f", cost)
-        } else {
-            return String(format: "$%.4f", cost)
-        }
+        Formatters.currency(cost)
     }
 
     private func formatTokenCount(_ count: Int) -> String {
@@ -309,15 +305,11 @@ struct CostDetailView: View {
     }
 
     private func todayString() -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        return f.string(from: Date())
+        Formatters.isoDay.string(from: Date())
     }
 
     private func todayDisplayDate() -> String {
-        let f = DateFormatter()
-        f.dateFormat = "MMM d"
-        return f.string(from: Date())
+        Formatters.monthDay.string(from: Date())
     }
 
     private func shortDate(_ dateStr: String) -> String {

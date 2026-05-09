@@ -27,26 +27,17 @@ struct CCSwitcherApp: App {
     @AppStorage("refreshInterval") private var refreshInterval: Double = 300
     @AppStorage("appLanguage") private var appLanguage = "auto"
 
-    @State private var isDoubleUsageActive = false
-    let timer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
-
     var body: some Scene {
         // Hidden 1×1 window to keep SwiftUI's lifecycle alive so `Settings` scene
         // shows the native toolbar tabs even though the UI is AppKit-based.
         WindowGroup("CCSwitcherKeepalive") {
             HiddenWindowView()
                 .onAppear {
-                    // Check for updates silently on app launch
+                    // Update check is throttled to 24h internally.
                     updateChecker.checkForUpdates(manual: false)
-                    checkDoubleUsage()
-                    // Kick off background usage tracking immediately upon app start
                     Task {
                         await appState.refresh()
-                        appState.startAutoRefresh(interval: refreshInterval)
                     }
-                }
-                .onReceive(timer) { _ in
-                    checkDoubleUsage()
                 }
         }
         .defaultSize(width: 20, height: 20)
@@ -57,6 +48,17 @@ struct CCSwitcherApp: App {
                 .environmentObject(appState)
                 .environmentObject(updateChecker)
                 .environment(\.locale, currentLocale)
+                .onAppear {
+                    // Refresh-on-open + start periodic timer.
+                    appState.menuDidAppear()
+                    appState.startAutoRefresh(interval: refreshInterval)
+                    Task { await appState.refresh() }
+                }
+                .onDisappear {
+                    // Pause timer while popover is closed — no point burning
+                    // CPU/network polling state nobody can see.
+                    appState.menuDidDisappear()
+                }
         } label: {
             menuBarLabel
         }
@@ -76,58 +78,13 @@ struct CCSwitcherApp: App {
 
     private var menuBarLabel: some View {
         HStack(spacing: 4) {
-            Image(systemName: isDoubleUsageActive ? "brain.head.profile.fill" : "brain.head.profile")
+            Image(systemName: "brain.head.profile")
             if showAccountName {
                 if let account = appState.activeAccount {
                     Text(account.effectiveDisplayName(obfuscated: !showFullEmail))
                         .font(.caption)
                 }
             }
-        }
-    }
-    
-    private func checkDoubleUsage() {
-        let date = Date()
-        let calendar = Calendar(identifier: .gregorian)
-        
-        var promoStartComponents = DateComponents()
-        promoStartComponents.year = 2026
-        promoStartComponents.month = 3
-        promoStartComponents.day = 13
-        
-        var promoEndComponents = DateComponents()
-        promoEndComponents.year = 2026
-        promoEndComponents.month = 3
-        promoEndComponents.day = 29 // up to March 28 inclusive
-        
-        guard let start = calendar.date(from: promoStartComponents),
-              let end = calendar.date(from: promoEndComponents),
-              date >= start && date < end else {
-            isDoubleUsageActive = false
-            return
-        }
-        
-        guard let etTimeZone = TimeZone(identifier: "America/New_York") else {
-            isDoubleUsageActive = false
-            return
-        }
-        
-        var etCalendar = Calendar(identifier: .gregorian)
-        etCalendar.timeZone = etTimeZone
-        
-        let weekday = etCalendar.component(.weekday, from: date)
-        // 1 = Sunday, 7 = Saturday
-        if weekday == 1 || weekday == 7 {
-            isDoubleUsageActive = true
-            return
-        }
-        
-        let hour = etCalendar.component(.hour, from: date)
-        // 8 AM to 2 PM (14:00) ET is normal. Outside this is double.
-        if hour >= 8 && hour < 14 {
-            isDoubleUsageActive = false
-        } else {
-            isDoubleUsageActive = true
         }
     }
 }

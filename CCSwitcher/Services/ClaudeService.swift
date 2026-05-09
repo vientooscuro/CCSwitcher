@@ -6,58 +6,78 @@ private let log = FileLog("Claude")
 final class ClaudeService: Sendable {
     static let shared = ClaudeService()
 
-    private let claudePath: String
+    /// Resolved lazily on a background queue so app launch never blocks on
+    /// `/bin/zsh -ilc` (which can take seconds with a heavy `.zshrc`).
+    private let pathTask: Task<String, Never>
+
+    /// Pre-built process environment (PATH + HOME). Computed once after path
+    /// resolution and reused for every `runClaude` invocation.
+    private let envTask: Task<[String: String], Never>
+
+    /// Custom URLSession with a 10s request timeout — `URLSession.shared`'s
+    /// default 60s causes `refresh()` to hang for up to a minute when the API
+    /// endpoint is unresponsive.
+    private let session: URLSession
 
     private init() {
+        let curated = Self.curatedPaths()
+        let immediate = curated.first { FileManager.default.fileExists(atPath: $0) }
+
+        // Path resolution: try curated paths synchronously (cheap — just
+        // `fileExists`), and only fork zsh in the background if we have to.
+        let pathTask = Task<String, Never>.detached(priority: .userInitiated) {
+            if let immediate {
+                log.info("Claude binary path: \(immediate) (curated)")
+                return immediate
+            }
+            if let shellPath = Self.shellPathLookup() {
+                log.info("Claude binary path: \(shellPath) (resolved via user shell PATH)")
+                return shellPath
+            }
+            log.warning("Claude binary not found; falling back to bare 'claude'")
+            return "claude"
+        }
+        self.pathTask = pathTask
+
+        self.envTask = Task<[String: String], Never>.detached(priority: .userInitiated) {
+            let path = await pathTask.value
+            return Self.buildEnvironment(claudePath: path)
+        }
+
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 10
+        config.timeoutIntervalForResource = 30
+        config.waitsForConnectivity = false
+        self.session = URLSession(configuration: config)
+    }
+
+    // MARK: - Path discovery
+
+    private static func curatedPaths() -> [String] {
         let home = NSHomeDirectory()
-        let possiblePaths = [
-            // Homebrew cask / system prefix
+        return [
             "/usr/local/bin/claude",
             "/opt/homebrew/bin/claude",
-            // MacPorts
             "/opt/local/bin/claude",
-            // Native installer (Anthropic-recommended) and legacy migrate-installer
             "\(home)/.local/bin/claude",
             "\(home)/.claude/local/claude",
-            // npm with custom prefix
             "\(home)/.npm-global/bin/claude",
-            // Alternative JS package managers / Node version managers
             "\(home)/.volta/bin/claude",
             "\(home)/Library/pnpm/claude",
             "\(home)/.bun/bin/claude",
             "\(home)/.yarn/bin/claude"
-        ] + Self.nvmPaths()
-
-        if let found = possiblePaths.first(where: { FileManager.default.fileExists(atPath: $0) }) {
-            self.claudePath = found
-            log.info("Claude binary path: \(self.claudePath) (curated)")
-        } else if let shellPath = Self.shellPathLookup() {
-            self.claudePath = shellPath
-            log.info("Claude binary path: \(self.claudePath) (resolved via user shell PATH)")
-        } else {
-            self.claudePath = "claude"
-            log.warning("Claude binary not found in curated paths or user shell PATH; falling back to bare 'claude'")
-        }
+        ] + nvmPaths()
     }
 
-    /// Discover Claude binaries installed via NVM (Node Version Manager).
-    /// NVM stores node versions at ~/.nvm/versions/node/<version>/bin/.
     private static func nvmPaths() -> [String] {
         let nvmDir = "\(NSHomeDirectory())/.nvm/versions/node"
         guard FileManager.default.fileExists(atPath: nvmDir) else { return [] }
-        guard let versions = try? FileManager.default.contentsOfDirectory(atPath: nvmDir) else {
-            log.warning("[nvmPaths] NVM directory exists but could not be read: \(nvmDir)")
-            return []
-        }
+        guard let versions = try? FileManager.default.contentsOfDirectory(atPath: nvmDir) else { return [] }
         return versions
             .filter { !$0.hasPrefix(".") }
             .map { "\(nvmDir)/\($0)/bin/claude" }
     }
 
-    /// Last-resort lookup: ask the user's interactive login shell where `claude` lives.
-    /// Catches install layouts the curated list doesn't enumerate (asdf shims, fnm, n,
-    /// pnpm/yarn/bun/Volta with non-default prefixes, custom npm prefixes, etc.).
-    /// Bounded by a short timeout so a slow .zshrc can't block app launch.
     private static func shellPathLookup() -> String? {
         let process = Process()
         let stdout = Pipe()
@@ -74,7 +94,6 @@ final class ClaudeService: Sendable {
             return nil
         }
 
-        // Hard timeout — don't let a heavy shell rc file block forever.
         let deadline = Date().addingTimeInterval(3.0)
         while process.isRunning && Date() < deadline {
             Thread.sleep(forTimeInterval: 0.05)
@@ -88,7 +107,6 @@ final class ClaudeService: Sendable {
         guard process.terminationStatus == 0 else { return nil }
         let data = stdout.fileHandleForReading.readDataToEndOfFile()
         let raw = String(data: data, encoding: .utf8) ?? ""
-        // `command -v` may emit multiple lines if claude is shadowed; take the first.
         let candidate = raw
             .split(whereSeparator: \.isNewline)
             .first
@@ -99,6 +117,28 @@ final class ClaudeService: Sendable {
             return nil
         }
         return candidate
+    }
+
+    private static func buildEnvironment(claudePath: String) -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        let homeDir = NSHomeDirectory()
+
+        var extraPaths = [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "\(homeDir)/.local/bin",
+            "\(homeDir)/.npm-global/bin"
+        ]
+        if claudePath.contains("/") {
+            // Resolve symlinks once so NVM-installed CLIs find `node` on PATH.
+            let resolved = URL(fileURLWithPath: claudePath).resolvingSymlinksInPath().path
+            let resolvedBinDir = URL(fileURLWithPath: resolved).deletingLastPathComponent().path
+            extraPaths.insert(resolvedBinDir, at: 0)
+        }
+        let existingPath = env["PATH"] ?? "/usr/bin:/bin"
+        env["PATH"] = (extraPaths + [existingPath]).joined(separator: ":")
+        env["HOME"] = homeDir
+        return env
     }
 
     // MARK: - Auth Status
@@ -143,7 +183,7 @@ final class ClaudeService: Sendable {
 
         log.debug("[getUsageLimits] REQUEST URL: \(url.absoluteString)")
 
-        let (responseData, response) = try await URLSession.shared.data(for: request)
+        let (responseData, response) = try await session.data(for: request)
         let httpResponse = response as? HTTPURLResponse
         guard httpResponse?.statusCode == 200 else {
             let responseString = String(data: responseData, encoding: .utf8) ?? ""
@@ -154,7 +194,7 @@ final class ClaudeService: Sendable {
             }
             throw UsageError.network("HTTP \(httpResponse?.statusCode ?? 0)")
         }
-        
+
         do {
             let usage = try JSONDecoder().decode(UsageAPIResponse.self, from: responseData)
             log.info("[getUsageLimits] session=\(usage.fiveHour?.utilization ?? -1)%, weekly=\(usage.sevenDay?.utilization ?? -1)%")
@@ -165,31 +205,34 @@ final class ClaudeService: Sendable {
         }
     }
 
-    /// Extract access token string from a token JSON (keychain format)
+    /// Extract access token string from a token JSON (keychain format).
+    /// Shape: `{ "claudeAiOauth": { "accessToken": "..." } }`.
+    private struct TokenEnvelope: Decodable {
+        struct OAuth: Decodable { let accessToken: String }
+        let claudeAiOauth: OAuth
+    }
+
     static func extractAccessToken(from tokenJSON: String) -> String? {
-        guard let data = tokenJSON.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let oauth = json["claudeAiOauth"] as? [String: Any],
-              let accessToken = oauth["accessToken"] as? String else {
-            return nil
-        }
-        return accessToken
+        guard let data = tokenJSON.data(using: .utf8) else { return nil }
+        return (try? JSONDecoder().decode(TokenEnvelope.self, from: data))?.claudeAiOauth.accessToken
     }
 
     // MARK: - Account Switching
 
-    func switchAccount(from currentAccount: Account, to targetAccount: Account) async throws {
+    /// Switches credentials and verifies. Returns the verified `AuthStatus`
+    /// so the caller can avoid running `claude auth status` a second time.
+    @discardableResult
+    func switchAccount(from currentAccount: Account, to targetAccount: Account) async throws -> AuthStatus {
         let keychain = KeychainService.shared
 
         log.info("[switchAccount] Switching from \(currentAccount.id) to \(targetAccount.id)")
 
-        // 1. Back up current account (token + oauthAccount)
         log.info("[switchAccount] Step 1: Backing up current account...")
-        if let currentToken = keychain.readClaudeToken(),
-           let currentOAuth = keychain.readOAuthAccount() {
+        if let currentToken = await keychain.readClaudeToken(),
+           let currentOAuth = await keychain.readOAuthAccount() {
             let email = (currentOAuth["emailAddress"]?.value as? String) ?? "?"
             if email == currentAccount.email {
-                let saved = keychain.saveAccountBackup(token: currentToken, oauthAccount: currentOAuth, forAccountId: currentAccount.id.uuidString)
+                let saved = await keychain.saveAccountBackup(token: currentToken, oauthAccount: currentOAuth, forAccountId: currentAccount.id.uuidString)
                 log.info("[switchAccount] Step 1: Backup saved: \(saved)")
             } else {
                 log.warning("[switchAccount] Step 1: oauthAccount email (\(email)) != source (\(currentAccount.email)), skipping backup")
@@ -198,28 +241,25 @@ final class ClaudeService: Sendable {
             log.warning("[switchAccount] Step 1: Could not read current token or oauthAccount")
         }
 
-        // 2. Retrieve target account's backup
         log.info("[switchAccount] Step 2: Reading backup for target account...")
-        guard let targetBackup = keychain.getAccountBackup(forAccountId: targetAccount.id.uuidString) else {
+        guard let targetBackup = await keychain.getAccountBackup(forAccountId: targetAccount.id.uuidString) else {
             log.error("[switchAccount] Step 2: No backup found for target account!")
             throw ClaudeServiceError.noTokenForAccount(targetAccount.id.uuidString)
         }
         let targetEmail = (targetBackup.oauthAccount["emailAddress"]?.value as? String) ?? "?"
         log.info("[switchAccount] Step 2: Target backup found (email=\(targetEmail))")
 
-        // 3. Write target token to keychain + target oauthAccount to ~/.claude.json
         log.info("[switchAccount] Step 3: Writing target credentials...")
-        guard keychain.writeClaudeToken(targetBackup.token) else {
+        guard await keychain.writeClaudeToken(targetBackup.token) else {
             log.error("[switchAccount] Step 3: Failed to write token to keychain!")
             throw ClaudeServiceError.keychainWriteFailed
         }
-        guard keychain.writeOAuthAccount(targetBackup.oauthAccount) else {
+        guard await keychain.writeOAuthAccount(targetBackup.oauthAccount) else {
             log.error("[switchAccount] Step 3: Failed to write oauthAccount to ~/.claude.json!")
             throw ClaudeServiceError.oauthAccountWriteFailed
         }
         log.info("[switchAccount] Step 3: Both token and oauthAccount written")
 
-        // 4. Verify
         log.info("[switchAccount] Step 4: Verifying with `claude auth status`...")
         let status = try await getAuthStatus()
         guard status.loggedIn else {
@@ -231,23 +271,24 @@ final class ClaudeService: Sendable {
             throw ClaudeServiceError.switchWrongAccount(expected: targetAccount.email, actual: status.email ?? "unknown")
         }
         log.info("[switchAccount] Step 4: Switch verified — logged in as \(status.email ?? "")")
+        return status
     }
 
     /// Capture the current Claude auth token + oauthAccount and associate with an account
-    func captureCurrentCredentials(forAccountId accountId: String) -> Bool {
+    func captureCurrentCredentials(forAccountId accountId: String) async -> Bool {
         log.info("[capture] Capturing credentials for account \(accountId)...")
         let keychain = KeychainService.shared
-        guard let token = keychain.readClaudeToken() else {
+        guard let token = await keychain.readClaudeToken() else {
             log.error("[capture] Failed: no token found in keychain")
             return false
         }
-        guard let oauthAccount = keychain.readOAuthAccount() else {
+        guard let oauthAccount = await keychain.readOAuthAccount() else {
             log.error("[capture] Failed: no oauthAccount found in ~/.claude.json")
             return false
         }
         let email = (oauthAccount["emailAddress"]?.value as? String) ?? "?"
         log.info("[capture] Token + oauthAccount found (email=\(email)), saving backup...")
-        let result = keychain.saveAccountBackup(token: token, oauthAccount: oauthAccount, forAccountId: accountId)
+        let result = await keychain.saveAccountBackup(token: token, oauthAccount: oauthAccount, forAccountId: accountId)
         log.info("[capture] Save result: \(result)")
         return result
     }
@@ -258,7 +299,6 @@ final class ClaudeService: Sendable {
         _ = try await runClaude(args: ["auth", "login"])
         log.info("[login] `claude auth login` process exited")
 
-        // Give keychain a moment to sync after CLI writes
         try await Task.sleep(for: .seconds(1))
         log.info("[login] Post-login delay complete, ready for token capture")
     }
@@ -273,9 +313,12 @@ final class ClaudeService: Sendable {
     // MARK: - CLI Runner
 
     private func runClaude(args: [String]) async throws -> String {
+        let claudePath = await pathTask.value
+        let env = await envTask.value
         log.debug("[runClaude] Running: claude \(args.joined(separator: " "))")
+
         return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async { [claudePath] in
+            DispatchQueue.global(qos: .userInitiated).async {
                 let process = Process()
                 let pipe = Pipe()
 
@@ -283,28 +326,6 @@ final class ClaudeService: Sendable {
                 process.arguments = args
                 process.standardOutput = pipe
                 process.standardError = pipe
-
-                var env = ProcessInfo.processInfo.environment
-                let homeDir = NSHomeDirectory()
-                // Include the parent directory of the discovered claude binary
-                // so that `node` is on PATH for NVM-installed scripts.
-                // Only add it when claudePath is absolute (skip the bare "claude" fallback).
-                var extraPaths = [
-                    "/opt/homebrew/bin",
-                    "/usr/local/bin",
-                    "\(homeDir)/.local/bin",
-                    "\(homeDir)/.npm-global/bin"
-                ]
-                if claudePath.contains("/") {
-                    // Resolve symlinks so that e.g. /usr/local/bin/claude -> ~/.nvm/.../bin/claude
-                    // yields the NVM bin dir where `node` actually lives
-                    let resolved = URL(fileURLWithPath: claudePath).resolvingSymlinksInPath().path
-                    let resolvedBinDir = URL(fileURLWithPath: resolved).deletingLastPathComponent().path
-                    extraPaths.insert(resolvedBinDir, at: 0)
-                }
-                let existingPath = env["PATH"] ?? "/usr/bin:/bin"
-                env["PATH"] = (extraPaths + [existingPath]).joined(separator: ":")
-                env["HOME"] = homeDir
                 process.environment = env
 
                 do {

@@ -4,13 +4,17 @@ import Security
 private let log = FileLog("Keychain")
 
 /// Per-account backup: keychain token + oauthAccount from ~/.claude.json
-struct AccountBackup: Codable {
+///
+/// `@unchecked Sendable` — `AnyCodable` wraps `Any`, but in practice we only
+/// store immutable JSON-derived values (NSNumber/NSString/NSNull/Array/Dict
+/// of the same), so passing snapshots across actors is safe.
+struct AccountBackup: Codable, @unchecked Sendable {
     let token: String
     let oauthAccount: [String: AnyCodable]
 }
 
 /// Type-erased Codable wrapper for heterogeneous JSON values.
-struct AnyCodable: Codable, Equatable {
+struct AnyCodable: Codable, @unchecked Sendable {
     let value: Any
 
     init(_ value: Any) { self.value = value }
@@ -40,23 +44,29 @@ struct AnyCodable: Codable, Equatable {
         default: throw EncodingError.invalidValue(value, .init(codingPath: [], debugDescription: "Unsupported type"))
         }
     }
-
-    static func == (lhs: AnyCodable, rhs: AnyCodable) -> Bool {
-        String(describing: lhs.value) == String(describing: rhs.value)
-    }
 }
 
-/// Manages token + identity storage:
-/// - Claude CLI's token: read/write via `security` CLI (keychain).
-/// - Claude CLI's identity: read/write oauthAccount in ~/.claude.json.
-/// - Our backups: per-account {token, oauthAccount} in ~/.ccswitcher/backups.json.
-final class KeychainService: Sendable {
+/// Manages token + identity storage as an actor.
+///
+/// Calls fork `/usr/bin/security` and parse `~/.claude.json` (which can be
+/// 1–10 MB) — none of that should ever happen on the main thread. Wrapping
+/// the type as an `actor` guarantees every call hops to a dedicated
+/// executor; chains like `switchAccount` no longer freeze the UI.
+///
+/// In-memory backup-store cache: `loadBackupStore` used to hit Keychain +
+/// `JSONDecoder` once per `getAccountBackup` call. With N accounts and a
+/// `fetchAllAccountUsage` round, that meant 2N round-trips per refresh.
+/// We now keep the decoded dict in memory and invalidate on writes.
+actor KeychainService {
     static let shared = KeychainService()
 
     private let claudeService = "Claude Code-credentials"
     private let claudeAccount: String
     private let backupsFilePath: String
     private let claudeJsonPath: String
+
+    /// In-memory mirror of the backup store. Loaded lazily.
+    private var backupCache: [String: AccountBackup]?
 
     private init() {
         self.claudeAccount = NSUserName()
@@ -66,15 +76,12 @@ final class KeychainService: Sendable {
         self.backupsFilePath = dir + "/backups.json"
         self.claudeJsonPath = home + "/.claude.json"
 
-        // Ensure directory exists
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
 
-        // Migrate old tokens.json → backups.json if needed
+        // Migrate legacy tokens.json (token-only, can't be salvaged)
         let oldPath = dir + "/tokens.json"
         if FileManager.default.fileExists(atPath: oldPath) && !FileManager.default.fileExists(atPath: backupsFilePath) {
             log.info("init: Migrating tokens.json → backups.json (old format, token-only entries)")
-            // Old format was {accountId: tokenString}. We can't migrate without oauthAccount,
-            // so just delete the stale file — user will need to re-capture.
             try? FileManager.default.removeItem(atPath: oldPath)
         }
 
@@ -90,9 +97,8 @@ final class KeychainService: Sendable {
             "-a", claudeAccount,
             "-w"
         ])
-        
+
         if let token {
-            // Clean up possible trailing newlines from security CLI output
             let sanitized = token.trimmingCharacters(in: .whitespacesAndNewlines)
             log.info("[readClaudeToken] Found via security CLI, length=\(sanitized.count)")
             return sanitized
@@ -103,7 +109,6 @@ final class KeychainService: Sendable {
     }
 
     func writeClaudeToken(_ token: String) -> Bool {
-        // Delete then add (security CLI doesn't have a pure "update" for generic passwords)
         _ = runSecurityStatus(args: ["delete-generic-password", "-s", claudeService, "-a", claudeAccount])
 
         let added = runSecurityStatus(args: [
@@ -118,33 +123,37 @@ final class KeychainService: Sendable {
     }
 
     // MARK: - ~/.claude.json oauthAccount Operations
+    //
+    // Both read and write use `JSONSerialization` directly. The previous
+    // implementation round-tripped the entire ~/.claude.json (often several
+    // MB) through `[String: AnyCodable]` codable trees, which was a
+    // 100–500ms freeze on main thread. Now we touch only the `oauthAccount`
+    // sub-tree.
 
     func readOAuthAccount() -> [String: AnyCodable]? {
         guard let data = FileManager.default.contents(atPath: claudeJsonPath),
-              let json = try? JSONDecoder().decode([String: AnyCodable].self, from: data),
-              let oauthEntry = json["oauthAccount"],
-              let dict = oauthEntry.value as? [String: AnyCodable] else {
+              let json = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
+              let oauth = json["oauthAccount"] as? [String: Any] else {
             log.error("[readOAuthAccount] Failed to read oauthAccount from \(claudeJsonPath)")
             return nil
         }
-        let email = (dict["emailAddress"]?.value as? String) ?? "?"
+        let wrapped = Self.wrap(oauth) as? [String: AnyCodable] ?? [:]
+        let email = (wrapped["emailAddress"]?.value as? String) ?? "?"
         log.info("[readOAuthAccount] Found: email=\(email)")
-        return dict
+        return wrapped
     }
 
     func writeOAuthAccount(_ oauthAccount: [String: AnyCodable]) -> Bool {
         guard let data = FileManager.default.contents(atPath: claudeJsonPath),
-              var json = try? JSONDecoder().decode([String: AnyCodable].self, from: data) else {
+              var json = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
             log.error("[writeOAuthAccount] Failed to read \(claudeJsonPath)")
             return false
         }
 
-        json["oauthAccount"] = AnyCodable(oauthAccount)
+        json["oauthAccount"] = Self.unwrap(oauthAccount)
 
         do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let newData = try encoder.encode(json)
+            let newData = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
             try newData.write(to: URL(fileURLWithPath: claudeJsonPath), options: .atomic)
             let email = (oauthAccount["emailAddress"]?.value as? String) ?? "?"
             log.info("[writeOAuthAccount] Written: email=\(email)")
@@ -163,6 +172,7 @@ final class KeychainService: Sendable {
         var store = loadBackupStore()
         store[accountId] = AccountBackup(token: token, oauthAccount: oauthAccount)
         let result = saveBackupStore(store)
+        if result { backupCache = store }
         log.info("[saveBackup] Result: \(result)")
         return result
     }
@@ -184,12 +194,9 @@ final class KeychainService: Sendable {
         log.info("[removeBackup] Removing for accountId=\(accountId)")
         var store = loadBackupStore()
         store.removeValue(forKey: accountId)
-        return saveBackupStore(store)
-    }
-
-    // Legacy compatibility — read token string only (for diagnostics)
-    func getAccountToken(forAccountId accountId: String) -> String? {
-        return getAccountBackup(forAccountId: accountId)?.token
+        let ok = saveBackupStore(store)
+        if ok { backupCache = store }
+        return ok
     }
 
     // MARK: - App Keychain operations (Backups)
@@ -198,6 +205,10 @@ final class KeychainService: Sendable {
     private let appBackupAccount = "all-accounts"
 
     private func loadBackupStore() -> [String: AccountBackup] {
+        if let cached = backupCache {
+            return cached
+        }
+
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: appBackupService,
@@ -205,30 +216,31 @@ final class KeychainService: Sendable {
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
-        
+
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
-        
+
         if status == errSecSuccess, let data = item as? Data,
            let dict = try? JSONDecoder().decode([String: AccountBackup].self, from: data) {
             log.debug("[loadBackupStore] Loaded \(dict.count) entries from Keychain")
+            backupCache = dict
             return dict
         }
-        
-        // Migration from local file
+
+        // One-shot migration from local file
         if FileManager.default.fileExists(atPath: backupsFilePath),
            let data = FileManager.default.contents(atPath: backupsFilePath),
            let dict = try? JSONDecoder().decode([String: AccountBackup].self, from: data) {
             log.info("[loadBackupStore] Migrating from local backups.json to Keychain...")
-            // Save to keychain now (call saveBackupStore synchronously)
             _ = saveBackupStore(dict)
-            // Delete old file
             try? FileManager.default.removeItem(atPath: backupsFilePath)
             log.info("[loadBackupStore] Migration complete, local backups.json removed")
+            backupCache = dict
             return dict
         }
-        
+
         log.debug("[loadBackupStore] No existing backups, returning empty")
+        backupCache = [:]
         return [:]
     }
 
@@ -236,25 +248,25 @@ final class KeychainService: Sendable {
         do {
             let encoder = JSONEncoder()
             let data = try encoder.encode(store)
-            
+
             let query: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: appBackupService,
                 kSecAttrAccount as String: appBackupAccount
             ]
-            
+
             let attributes: [String: Any] = [
                 kSecValueData as String: data
             ]
-            
+
             var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-            
+
             if status == errSecItemNotFound {
                 var newItem = query
                 newItem[kSecValueData as String] = data
                 status = SecItemAdd(newItem as CFDictionary, nil)
             }
-            
+
             let success = status == errSecSuccess
             if success {
                 log.debug("[saveBackupStore] Saved \(store.count) entries to Keychain")
@@ -314,5 +326,30 @@ final class KeychainService: Sendable {
             log.error("[runSecurityStatus] Launch failed: \(error.localizedDescription)")
             return false
         }
+    }
+
+    // MARK: - AnyCodable <-> plain JSON helpers
+
+    /// Convert a plain JSONSerialization tree (NSNumber/NSString/NSNull/Array/Dict)
+    /// into `AnyCodable`-wrapped form for the legacy in-memory representation.
+    private static func wrap(_ value: Any) -> Any {
+        if let dict = value as? [String: Any] {
+            return dict.mapValues { AnyCodable(wrap($0)) }
+        }
+        if let arr = value as? [Any] {
+            return arr.map { AnyCodable(wrap($0)) }
+        }
+        return value
+    }
+
+    /// Walk an `AnyCodable`-wrapped tree and produce a plain Foundation tree
+    /// suitable for `JSONSerialization.data(withJSONObject:)`.
+    private static func unwrap(_ value: Any) -> Any {
+        if let ac = value as? AnyCodable { return unwrap(ac.value) }
+        if let dict = value as? [String: AnyCodable] { return dict.mapValues(unwrap) }
+        if let arr = value as? [AnyCodable] { return arr.map(unwrap) }
+        if let dict = value as? [String: Any] { return dict.mapValues(unwrap) }
+        if let arr = value as? [Any] { return arr.map(unwrap) }
+        return value
     }
 }

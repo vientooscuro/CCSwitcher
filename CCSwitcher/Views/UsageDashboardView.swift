@@ -94,7 +94,7 @@ struct UsageDashboardView: View {
             }
 
             StatWithTooltip(tooltip: Self.costDisclaimer) {
-                Text(cost >= 1 ? String(format: "$%.2f", cost) : String(format: "$%.4f", cost))
+                Text(Formatters.currency(cost))
                     .font(.title.weight(.semibold).monospacedDigit())
                     .foregroundStyle(.green)
             }

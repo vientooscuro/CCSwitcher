@@ -27,21 +27,50 @@ final class UpdateChecker: ObservableObject {
         let assets: [GitHubReleaseAsset]?
     }
 
+    private static let lastCheckKey = "com.ccswitcher.lastUpdateCheck"
+    /// GitHub's unauthenticated API rate limit is 60 req/hr. Checking once
+    /// per day keeps us well clear and avoids dragging on every app launch.
+    private static let autoCheckInterval: TimeInterval = 24 * 60 * 60
+
+    /// `URLSession.shared` defaults to a 60s request timeout — too long for a
+    /// background update check on launch.
+    private static let session: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 10
+        config.timeoutIntervalForResource = 30
+        config.waitsForConnectivity = false
+        return URLSession(configuration: config)
+    }()
+
     /// Checks for updates.
     /// - Parameter manual: If true, it will show an alert even if no update is found.
+    ///   Manual checks bypass the 24h throttle.
     func checkForUpdates(manual: Bool = false) {
         guard !isChecking && !isDownloading else { return }
+
+        if !manual {
+            let last = UserDefaults.standard.double(forKey: Self.lastCheckKey)
+            if last > 0 {
+                let elapsed = Date().timeIntervalSince1970 - last
+                if elapsed < Self.autoCheckInterval { return }
+            }
+        }
+
         isChecking = true
-        
+
         Task {
             defer { self.isChecking = false }
-            
+
             do {
                 let url = URL(string: "https://api.github.com/repos/\(owner)/\(repo)/releases/latest")!
                 var request = URLRequest(url: url)
                 request.setValue("application/vnd.github.v3+json", forHTTPHeaderField: "Accept")
-                
-                let (data, response) = try await URLSession.shared.data(for: request)
+
+                let (data, response) = try await Self.session.data(for: request)
+                // Mark the check as successful only after a network response —
+                // if we set this above, a failed call would suppress retries
+                // for 24h.
+                UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.lastCheckKey)
                 
                 guard let httpResponse = response as? HTTPURLResponse else {
                     if manual {
@@ -172,7 +201,8 @@ final class UpdateChecker: ObservableObject {
         panel.makeKeyAndOrderFront(nil)
         
         do {
-            // Download the file
+            // Download the file (uses default URLSession — large body, the
+            // 30s resource timeout we use for the JSON probe is too tight).
             let (tempURL, response) = try await URLSession.shared.download(from: url)
             guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
                 throw URLError(.badServerResponse)
