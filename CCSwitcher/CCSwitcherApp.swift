@@ -36,8 +36,10 @@ struct CCSwitcherApp: App {
         WindowGroup("CCSwitcherKeepalive") {
             HiddenWindowView()
                 .onAppear {
-                    // Check for updates silently on app launch
-                    updateChecker.checkForUpdates(manual: false)
+                    // Sparkle's SPUStandardUpdaterController(startingUpdater: true)
+                    // schedules its own background update checks; no need to
+                    // call checkForUpdates here.
+                    _ = updateChecker
                     checkDoubleUsage()
                     // Kick off background usage tracking immediately upon app start
                     Task {
