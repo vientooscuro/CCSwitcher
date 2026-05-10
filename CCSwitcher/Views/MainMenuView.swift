@@ -132,6 +132,21 @@ struct MainMenuView: View {
         }
         .frame(width: 360, height: popoverHeight)
         .animation(.easeInOut(duration: 0.2), value: popoverHeight)
+        .background(
+            // Probe: report the actual rendered size of the outer VStack
+            // (after .frame is applied). If this doesn't match popoverHeight,
+            // we have a frame-not-applied problem; if it matches but the
+            // popover panel is still bigger, the issue is the panel itself.
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear {
+                        popoverLog.info("[actual] vstack size=\(geo.size.width)x\(geo.size.height)")
+                    }
+                    .onChange(of: geo.size) { _, new in
+                        popoverLog.info("[actual] vstack size=\(new.width)x\(new.height)")
+                    }
+            }
+        )
         .background(.ultraThinMaterial)
         .onAppear {
             popoverLog.info("[appear] tab=\(self.selectedTab.rawValue) chrome=\(self.chromeHeight) usage=\(self.usageContentHeight) popover=\(self.popoverHeight)")
