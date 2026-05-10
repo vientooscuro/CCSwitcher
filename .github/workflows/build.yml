@@ -14,12 +14,12 @@ permissions:
 
 jobs:
   build:
-    # Use the latest macOS runner so binaries are built against the current
-    # SDK. Building on an older runner causes SwiftUI to apply legacy
-    # behavior shims when the binary runs on a newer host OS — including
-    # MenuBarExtra panel-sizing differences observed on Tahoe with
-    # Sonoma-built binaries.
-    runs-on: macos-latest
+    # Pin to macos-26 (Tahoe) so binaries are built against the macOS 26
+    # SDK — same as developer's local environment. `macos-latest` resolves
+    # to macos-15 (Sequoia) at time of writing, which still triggers
+    # SwiftUI behavior-compat shims for MenuBarExtra panel sizing when the
+    # binary is run on Tahoe.
+    runs-on: macos-26
     
     # Only run notarization if the secrets are available (e.g. not on forks)
     env:
