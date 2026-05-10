@@ -126,44 +126,6 @@ final class ClaudeService: Sendable {
         }
     }
 
-    /// Cheap "is the claude binary on disk where we expect" check.
-    /// Used in the periodic refresh path so we don't spawn the CLI every
-    /// 5 minutes — spawning the binary out of `~/.claude/local/...` (or any
-    /// non-system path) trips macOS Tahoe's App Management TCC service and
-    /// shows the "would like to access data from other apps" prompt.
-    func isClaudeAvailableQuick() -> Bool {
-        return FileManager.default.fileExists(atPath: claudePath)
-    }
-
-    /// Build an `AuthStatus` from local sources (keychain + `~/.claude.json`)
-    /// instead of running `claude auth status`. The CLI is itself a script
-    /// shipped by another vendor; spawning it on every refresh triggers
-    /// macOS App Management prompts on Tahoe. The fields the rest of the
-    /// app actually consumes (`loggedIn`, `email`, `orgName`,
-    /// `subscriptionType`) are all derivable locally.
-    func getAuthStatusLocal() -> AuthStatus {
-        let keychain = KeychainService.shared
-        let token = keychain.readClaudeToken()
-        let oauth = keychain.readOAuthAccount()
-
-        let email = oauth?["emailAddress"]?.value as? String
-        let loggedIn = (token != nil) && (email != nil)
-        let orgName = oauth?["organizationName"]?.value as? String
-        let subscriptionType = oauth?["organizationType"]?.value as? String
-        let orgId = oauth?["organizationUuid"]?.value as? String
-
-        log.info("[getAuthStatusLocal] loggedIn=\(loggedIn) email=\(email ?? "nil") sub=\(subscriptionType ?? "nil")")
-        return AuthStatus(
-            loggedIn: loggedIn,
-            authMethod: nil,
-            apiProvider: nil,
-            email: email,
-            orgId: orgId,
-            orgName: orgName,
-            subscriptionType: subscriptionType
-        )
-    }
-
     // MARK: - Usage API
 
     enum UsageError: Error {

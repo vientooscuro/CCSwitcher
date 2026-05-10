@@ -32,14 +32,6 @@ final class AppState: ObservableObject {
     
     @Published var accountUsageErrors: [UUID: UsageErrorState] = [:]
 
-    /// Rate-limit per-account delegated-refresh attempts so we don't spawn
-    /// `claude auth status` on every 5-minute refresh when an account's
-    /// token is genuinely expired. Each spawn pulls the `claude` Node script
-    /// out of `~/.claude/local/...`, which on macOS Tahoe trips App
-    /// Management TCC and shows a permission prompt.
-    private var lastDelegatedRefreshAttempt: [UUID: Date] = [:]
-    private let delegatedRefreshCooldown: TimeInterval = 30 * 60   // 30 min
-
     // MARK: - Services
 
     private let claudeService = ClaudeService.shared
@@ -69,21 +61,17 @@ final class AppState: ObservableObject {
         isLoading = true
         errorMessage = nil
 
-        // Cheap `claude` binary presence check — does NOT spawn the CLI.
-        // Spawning `claude --version` from `~/.claude/local/...` every 5 min
-        // trips macOS Tahoe's App Management TCC prompt ("would like to
-        // access data from other apps"). The full availability check still
-        // happens on first launch via the explicit menu action; for the
-        // periodic refresh, file-existence is enough.
-        claudeAvailable = claudeService.isClaudeAvailableQuick()
-        log.info("[refresh] Claude available (quick): \(self.claudeAvailable)")
+        claudeAvailable = await claudeService.isClaudeAvailable()
+        log.info("[refresh] Claude available: \(self.claudeAvailable)")
 
         if claudeAvailable {
-            // Build AuthStatus from keychain + ~/.claude.json instead of
-            // `claude auth status`. Same reason: avoids spawning the CLI
-            // on every refresh.
-            let status = claudeService.getAuthStatusLocal()
-            updateActiveAccount(from: status)
+            do {
+                let status = try await claudeService.getAuthStatus()
+                updateActiveAccount(from: status)
+            } catch {
+                log.error("[refresh] getAuthStatus failed: \(error.localizedDescription)")
+                errorMessage = error.localizedDescription
+            }
         }
 
         // Passive token health check (no CLI calls, keychain reads only)
@@ -422,38 +410,22 @@ final class AppState: ObservableObject {
             } catch ClaudeService.UsageError.expired {
                 log.warning("[fetchUsage] Token expired for \(account.email)")
                 if account.isActive {
-                    // Delegated refresh via `claude auth status` spawns the
-                    // CLI, which on macOS Tahoe triggers an App Management
-                    // TCC prompt. Rate-limit so we attempt at most once per
-                    // 30 min per account — that's still well below the
-                    // ~5-hour token expiry, so a healthy account recovers
-                    // before the next expiry rolls around.
-                    let lastAttempt = lastDelegatedRefreshAttempt[account.id]
-                    let cooldownActive = lastAttempt.map { Date().timeIntervalSince($0) < delegatedRefreshCooldown } ?? false
-                    if cooldownActive {
-                        log.info("[fetchUsage] Delegated refresh cooldown active for \(account.email); surfacing expired error without spawning CLI")
+                    // Active account: delegated refresh via `claude auth status` is safe (no keychain swap)
+                    do {
+                        _ = try await claudeService.getAuthStatus()
+                        log.info("[fetchUsage] Delegated refresh completed for active account.")
+                        // Re-read refreshed token and retry
+                        if let refreshedJSON = keychain.readClaudeToken(),
+                           let refreshedToken = ClaudeService.extractAccessToken(from: refreshedJSON),
+                           let usage = try? await claudeService.getUsageLimits(accessToken: refreshedToken) {
+                            accountUsage[account.id] = usage
+                            accountUsageErrors[account.id] = nil
+                            log.info("[fetchUsage] Recovered \(account.email) via delegated refresh.")
+                        }
+                    } catch {
+                        log.error("[fetchUsage] Delegated refresh failed for active account: \(error.localizedDescription)")
                         accountUsage[account.id] = nil
                         accountUsageErrors[account.id] = UsageErrorState(isExpired: true, isRateLimited: false, message: String(localized: "Token expired. Switch to refresh.", bundle: L10n.bundle))
-                    } else {
-                        lastDelegatedRefreshAttempt[account.id] = Date()
-                        do {
-                            _ = try await claudeService.getAuthStatus()
-                            log.info("[fetchUsage] Delegated refresh completed for active account.")
-                            // Re-read refreshed token and retry
-                            if let refreshedJSON = keychain.readClaudeToken(),
-                               let refreshedToken = ClaudeService.extractAccessToken(from: refreshedJSON),
-                               let usage = try? await claudeService.getUsageLimits(accessToken: refreshedToken) {
-                                accountUsage[account.id] = usage
-                                accountUsageErrors[account.id] = nil
-                                log.info("[fetchUsage] Recovered \(account.email) via delegated refresh.")
-                                // Reset cooldown on success — next expiry can refresh immediately.
-                                lastDelegatedRefreshAttempt[account.id] = nil
-                            }
-                        } catch {
-                            log.error("[fetchUsage] Delegated refresh failed for active account: \(error.localizedDescription)")
-                            accountUsage[account.id] = nil
-                            accountUsageErrors[account.id] = UsageErrorState(isExpired: true, isRateLimited: false, message: String(localized: "Token expired. Switch to refresh.", bundle: L10n.bundle))
-                        }
                     }
                 } else {
                     // Non-active account: do NOT silent-swap keychain — just mark as expired.
