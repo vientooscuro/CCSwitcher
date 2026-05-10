@@ -65,7 +65,7 @@ targets:
       path: CCSwitcher/Resources/CCSwitcher.entitlements
       properties:
         com.apple.security.application-groups:
-          - group.me.xueshi.ccswitcher
+          - 584KQTRF3B.me.xueshi.ccswitcher
     dependencies:
       - target: CCSwitcherWidgetExtension
         embed: true
@@ -105,4 +105,4 @@ targets:
       properties:
         com.apple.security.app-sandbox: true
         com.apple.security.application-groups:
-          - group.me.xueshi.ccswitcher
+          - 584KQTRF3B.me.xueshi.ccswitcher
