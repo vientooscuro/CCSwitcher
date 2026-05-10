@@ -77,49 +77,43 @@ jobs:
       - name: Sign App
         if: ${{ env.HAS_APPLE_SECRETS == 'true' }}
         run: |
-          # Sign nested code inside-out. With Sparkle linked, the app contains
-          # Sparkle.framework with its own XPC services and Updater.app — all
-          # need their own signature with --options runtime for notarization.
-          # `--preserve-metadata=entitlements` keeps each nested bundle's
-          # original entitlements intact (Sparkle's helpers ship with their
-          # own carefully-crafted entitlements we must not overwrite).
+          # Order matters: every nested binary inside Sparkle.framework must be
+          # signed BEFORE the framework itself, otherwise sealing the framework
+          # captures unsigned content and `codesign --verify --deep --strict`
+          # reports "nested code is modified or invalid". An earlier find-based
+          # walk had the wrong order plus symlink double-signing problems; the
+          # explicit list below matches Sparkle's own distribution recipe.
+          # `--preserve-metadata=entitlements` keeps each helper's bundled
+          # entitlements (we must not clobber Sparkle's installer entitlements).
           APP=build/Release/CCSwitcher.app
           IDENTITY="Developer ID Application"
+          SPARKLE_V="$APP/Contents/Frameworks/Sparkle.framework/Versions/B"
 
-          # 1. Sign Sparkle's nested code (frameworks, xpc services, updater app),
-          #    deepest first. Skips the widget extension (signed separately
-          #    below with its specific entitlements file).
-          while IFS= read -r bundle; do
-            if [[ "$bundle" == *"CCSwitcherWidgetExtension.appex" ]]; then
-              continue
+          for nested in \
+            "$SPARKLE_V/XPCServices/Downloader.xpc" \
+            "$SPARKLE_V/XPCServices/Installer.xpc" \
+            "$SPARKLE_V/Updater.app" \
+            "$SPARKLE_V/Autoupdate" \
+            "$APP/Contents/Frameworks/Sparkle.framework"; do
+            if [ -e "$nested" ]; then
+              codesign --force --options runtime --timestamp \
+                --sign "$IDENTITY" \
+                --preserve-metadata=identifier,entitlements,flags \
+                "$nested"
             fi
-            codesign --force --options runtime --timestamp \
-              --sign "$IDENTITY" \
-              --preserve-metadata=identifier,entitlements,flags \
-              "$bundle"
-          done < <(find "$APP/Contents" -depth \( -name "*.framework" -o -name "*.xpc" -o -name "*.app" -o -name "*.appex" \) -print)
+          done
 
-          # 1b. Defensive: some Sparkle versions ship a bare `Autoupdate`
-          # binary at the framework's Versions/B/ root, alongside Updater.app.
-          # The find pattern above only catches bundles; if a bare exec is
-          # present we sign it explicitly. Harmless no-op on layouts that
-          # don't have it.
-          SPARKLE_AUTOUPDATE="$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate"
-          if [ -f "$SPARKLE_AUTOUPDATE" ]; then
-            codesign --force --options runtime --timestamp --sign "$IDENTITY" "$SPARKLE_AUTOUPDATE"
-          fi
-
-          # 2. Sign the widget extension with its specific entitlements
+          # Widget extension with its own entitlements file
           codesign --force --options runtime --sign "$IDENTITY" --timestamp \
             --entitlements CCSwitcherWidget/Resources/CCSwitcherWidget.entitlements \
             "$APP/Contents/Extensions/CCSwitcherWidgetExtension.appex"
 
-          # 3. Sign the main app bundle
+          # Main app
           codesign --force --options runtime --sign "$IDENTITY" --timestamp \
             --entitlements CCSwitcher/Resources/CCSwitcher.entitlements \
             "$APP"
 
-          # 4. Verify the whole bundle is correctly signed for notarization
+          # Verify everything is correctly sealed for notarization
           codesign --verify --deep --strict --verbose=2 "$APP"
 
       - name: Create DMG
