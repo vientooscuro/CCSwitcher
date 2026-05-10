@@ -14,7 +14,12 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-14
+    # Use the latest macOS runner so binaries are built against the current
+    # SDK. Building on an older runner causes SwiftUI to apply legacy
+    # behavior shims when the binary runs on a newer host OS — including
+    # MenuBarExtra panel-sizing differences observed on Tahoe with
+    # Sonoma-built binaries.
+    runs-on: macos-latest
     
     # Only run notarization if the secrets are available (e.g. not on forks)
     env:
@@ -28,7 +33,10 @@ jobs:
       - name: Setup Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: '16.1'
+          # latest-stable picks the newest GA Xcode preinstalled on the
+          # runner, which matches the developer's local SDK and avoids
+          # SDK-skew SwiftUI compat shims on newer host OS versions.
+          xcode-version: 'latest-stable'
 
       - name: Install Build Tools
         run: brew install xcodegen create-dmg
