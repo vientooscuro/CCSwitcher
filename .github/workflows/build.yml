@@ -214,7 +214,13 @@ jobs:
           fi
 
           VERSION="${GITHUB_REF_NAME#v}"
-          BUILD=$(grep CURRENT_PROJECT_VERSION ../../project.yml | head -1 | awk -F'"' '{print $2}')
+          # Anchor the grep so it picks the SETTING line (e.g. `CURRENT_PROJECT_VERSION: "49"`)
+          # and skips reference lines like `CFBundleVersion: $(CURRENT_PROJECT_VERSION)`.
+          BUILD=$(grep -E '^\s*CURRENT_PROJECT_VERSION: ' ../../project.yml | head -1 | awk -F'"' '{print $2}')
+          if [ -z "$BUILD" ]; then
+            echo "ERROR: failed to parse CURRENT_PROJECT_VERSION from project.yml"
+            exit 1
+          fi
           FILE_LENGTH=$(stat -f%z CCSwitcher.dmg)
           DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/CCSwitcher.dmg"
           PUB_DATE=$(date -u +"%a, %d %b %Y %H:%M:%S +0000")
