@@ -171,16 +171,45 @@ jobs:
         env:
           SPARKLE_EDDSA_KEY: ${{ secrets.SPARKLE_EDDSA_KEY }}
         run: |
+          set -e
           cd build/Release
+
+          # Sparkle's sign_update expects the base64 of the raw 32-byte Ed25519
+          # seed. If the user accidentally stored the longer 64-byte seed+public
+          # concatenation as the secret, strip back to the first 32 bytes. The
+          # public half of the libsodium "secret key" can always be re-derived
+          # from the seed, so dropping it is lossless.
           KEY_FILE=$(mktemp)
-          echo -n "$SPARKLE_EDDSA_KEY" > "$KEY_FILE"
-          SIGN_OUTPUT=$("$RUNNER_TEMP/sparkle/bin/sign_update" CCSwitcher.dmg -f "$KEY_FILE")
+          DECODED_LEN=$(printf '%s' "$SPARKLE_EDDSA_KEY" | base64 -d 2>/dev/null | wc -c | tr -d ' ')
+          case "$DECODED_LEN" in
+            32)
+              printf '%s' "$SPARKLE_EDDSA_KEY" > "$KEY_FILE"
+              ;;
+            64)
+              echo "Note: SPARKLE_EDDSA_KEY decoded to 64 bytes; truncating to first 32 (raw seed) for sign_update."
+              printf '%s' "$SPARKLE_EDDSA_KEY" | base64 -d | head -c 32 | base64 > "$KEY_FILE"
+              ;;
+            *)
+              echo "ERROR: SPARKLE_EDDSA_KEY decoded length is $DECODED_LEN bytes; expected 32 or 64."
+              rm -f "$KEY_FILE"
+              exit 1
+              ;;
+          esac
+
+          # Capture both stdout and stderr so any sign_update failure surfaces
+          # in the action log instead of being swallowed by $() substitution.
+          if ! SIGN_OUTPUT=$("$RUNNER_TEMP/sparkle/bin/sign_update" CCSwitcher.dmg -f "$KEY_FILE" 2>&1); then
+            echo "ERROR: sign_update exited non-zero. Output:"
+            echo "$SIGN_OUTPUT"
+            rm -f "$KEY_FILE"
+            exit 1
+          fi
           rm -f "$KEY_FILE"
 
+          echo "sign_update output: $SIGN_OUTPUT"
           ED_SIGNATURE=$(echo "$SIGN_OUTPUT" | sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p')
           if [ -z "$ED_SIGNATURE" ]; then
-            echo "ERROR: sign_update did not emit a signature"
-            echo "Output was: $SIGN_OUTPUT"
+            echo "ERROR: could not parse sparkle:edSignature from sign_update output"
             exit 1
           fi
 
