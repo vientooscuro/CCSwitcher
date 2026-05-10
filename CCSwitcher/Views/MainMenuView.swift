@@ -1,5 +1,7 @@
 import SwiftUI
 
+private let popoverLog = FileLog("Popover")
+
 // MARK: - Popover Height Measurement
 //
 // The popover frame adapts to the natural height of the Usage tab's content
@@ -131,11 +133,23 @@ struct MainMenuView: View {
         .frame(width: 360, height: popoverHeight)
         .animation(.easeInOut(duration: 0.2), value: popoverHeight)
         .background(.ultraThinMaterial)
+        .onAppear {
+            popoverLog.info("[appear] tab=\(self.selectedTab.rawValue) chrome=\(self.chromeHeight) usage=\(self.usageContentHeight) popover=\(self.popoverHeight)")
+        }
         .onPreferenceChange(UsageContentHeightKey.self) { value in
             if value > 0 { usageContentHeight = value }
         }
         .onPreferenceChange(ChromeHeightKey.self) { value in
             if value > 0 { chromeHeight = value }
+        }
+        // Explicitly observe popoverHeight so SwiftUI tracks the computed
+        // value as a dependency of the .frame modifier above. Without this,
+        // some Release builds appear to skip the frame update when only the
+        // underlying @State (chromeHeight / usageContentHeight) changes —
+        // the panel locks at the initial-render height and shows the
+        // visible empty bands users reported in 1.5.3.
+        .onChange(of: popoverHeight) { _, new in
+            popoverLog.info("[height] popover=\(new)")
         }
     }
 
