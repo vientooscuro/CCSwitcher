@@ -59,6 +59,20 @@ final class AppState: ObservableObject {
     /// Cleared on success.
     private var accountUsageRateLimitedUntil: [UUID: Date] = [:]
 
+    /// Accounts whose stored refresh_token has been rejected by the OAuth
+    /// server (`invalid_grant`). Re-trying the same broken token every 5
+    /// minutes just wastes requests, so the account is skipped until the
+    /// user clicks the manual refresh button (which clears the set) or
+    /// switches to the account and lets the CLI re-issue credentials.
+    private var accountRefreshTokenInvalid: Set<UUID> = []
+
+    /// In-flight refresh tasks keyed by accountId. Two simultaneous
+    /// `fetchAllAccountUsage` invocations on the same expired token would
+    /// otherwise both call `refreshOAuthToken`; the first one would consume
+    /// the refresh_token and the second would get `invalid_grant`. By
+    /// awaiting an existing in-flight task we collapse those into one POST.
+    private var inFlightRefresh: [UUID: Task<Bool, Never>] = [:]
+
     /// Global throttle. `fetchAllAccountUsage` is a no-op if `refresh()` was
     /// called less than `Self.usageMinInterval` ago — this stops the menu-
     /// open + manual-button + timer combo from stacking up bursts of N
@@ -467,16 +481,29 @@ final class AppState: ObservableObject {
         }
         lastUsageFetchAttempt = now
 
+        // Manual refresh (force=true) is the user's way to say "try again"
+        // for accounts that previously bailed with invalid_grant. Reset the
+        // invalid set so those accounts get one more attempt.
+        if force { accountRefreshTokenInvalid.removeAll() }
+
         // Collect tokens up front (sequentially — keychain is a serial actor).
-        // Accounts that are still in a per-account 429 back-off window are
-        // skipped: the prior `accountUsageErrors[id]` entry is preserved so
-        // the UI keeps showing the rate-limit message.
+        // Accounts that are still in a per-account 429 back-off window OR
+        // marked as having an invalid refresh token are skipped: the prior
+        // `accountUsageErrors[id]` entry is preserved so the UI keeps showing
+        // the right message.
         var requests: [(account: Account, accessToken: String)] = []
         var freshErrors: [UUID: UsageErrorState] = [:]
         for account in accounts {
             if let until = accountUsageRateLimitedUntil[account.id], until > now {
                 let remaining = Int(until.timeIntervalSince(now))
                 log.info("[fetchUsage] Skipping \(account.email) — rate limited for \(remaining)s more")
+                if let existing = accountUsageErrors[account.id] {
+                    freshErrors[account.id] = existing
+                }
+                continue
+            }
+            if accountRefreshTokenInvalid.contains(account.id) {
+                log.info("[fetchUsage] Skipping \(account.email) — refresh_token invalid, awaiting manual refresh")
                 if let existing = accountUsageErrors[account.id] {
                     freshErrors[account.id] = existing
                 }
@@ -563,8 +590,12 @@ final class AppState: ObservableObject {
                                 log.error("[fetchUsage] Delegated refresh failed: \(error.localizedDescription)")
                             }
                         }
-                        accountUsage[r.accountId] = nil
-                        accountUsageErrors[r.accountId] = UsageErrorState(isExpired: true, isRateLimited: false, message: String(localized: "Session expired. Please re-authenticate this account in Claude Code.", bundle: L10n.bundle))
+                        // Don't clobber the specific invalid_grant message that
+                        // `performRefreshAndRetry` already wrote.
+                        if !accountRefreshTokenInvalid.contains(r.accountId) {
+                            accountUsage[r.accountId] = nil
+                            accountUsageErrors[r.accountId] = UsageErrorState(isExpired: true, isRateLimited: false, message: String(localized: "Session expired. Please re-authenticate this account in Claude Code.", bundle: L10n.bundle))
+                        }
 
                     case .rateLimited(let retryAfter):
                         let until = Date().addingTimeInterval(retryAfter)
@@ -592,7 +623,26 @@ final class AppState: ObservableObject {
     /// (writes through `KeychainService.writeClaudeToken`) and inactive
     /// accounts (writes through `saveAccountBackup`). Returns true on full
     /// recovery — `accountUsage` / `accountUsageErrors` have been updated.
+    ///
+    /// Per-account dedup: if a refresh is already running for `accountId`,
+    /// the caller awaits the existing task instead of starting a parallel
+    /// POST (which would burn the just-rotated refresh_token).
     private func refreshAndRetryUsage(accountId: UUID, isActive: Bool, email: String) async -> Bool {
+        if let existing = inFlightRefresh[accountId] {
+            log.info("[refresh] Coalescing with in-flight refresh for \(email)")
+            return await existing.value
+        }
+        let task = Task<Bool, Never> { [weak self] in
+            guard let self else { return false }
+            return await self.performRefreshAndRetry(accountId: accountId, isActive: isActive, email: email)
+        }
+        inFlightRefresh[accountId] = task
+        let result = await task.value
+        inFlightRefresh[accountId] = nil
+        return result
+    }
+
+    private func performRefreshAndRetry(accountId: UUID, isActive: Bool, email: String) async -> Bool {
         let storedJSON: String?
         if isActive {
             storedJSON = await keychain.readClaudeToken()
@@ -604,12 +654,34 @@ final class AppState: ObservableObject {
             return false
         }
 
+        // Log the refresh_token prefix so we can verify the read→POST→save
+        // chain preserves the token correctly. Truncated for safety.
+        if let creds = ClaudeService.extractCredentials(from: storedJSON),
+           let rt = creds.refreshToken {
+            log.info("[refresh] \(email): using refresh_token \(rt.prefix(8))… (len=\(rt.count))")
+        }
+
         let refreshed: (accessToken: String, mergedJSON: String)
         do {
             refreshed = try await claudeService.refreshOAuthToken(currentTokenJSON: storedJSON)
+        } catch ClaudeService.RefreshError.invalidGrant {
+            log.error("[refresh] \(email): server rejected refresh_token (invalid_grant). Marking account as needing re-auth.")
+            accountRefreshTokenInvalid.insert(accountId)
+            accountUsage[accountId] = nil
+            accountUsageErrors[accountId] = UsageErrorState(
+                isExpired: true,
+                isRateLimited: false,
+                message: String(localized: "Session expired and refresh failed. Run `claude` in Terminal to re-authenticate, then click refresh.", bundle: L10n.bundle)
+            )
+            return false
         } catch {
             log.error("[refresh] OAuth refresh failed for \(email): \(error)")
             return false
+        }
+
+        if let newCreds = ClaudeService.extractCredentials(from: refreshed.mergedJSON),
+           let newRT = newCreds.refreshToken {
+            log.info("[refresh] \(email): new refresh_token \(newRT.prefix(8))… (len=\(newRT.count))")
         }
 
         if isActive {
@@ -627,6 +699,14 @@ final class AppState: ObservableObject {
             if !ok {
                 log.error("[refresh] saveAccountBackup failed for \(email)")
                 return false
+            }
+            // Sanity check: read back what we just wrote.
+            if let verify = await keychain.getAccountBackup(forAccountId: accountId.uuidString)?.token,
+               let creds = ClaudeService.extractCredentials(from: verify),
+               let rt = creds.refreshToken {
+                log.info("[refresh] \(email): post-save refresh_token \(rt.prefix(8))…")
+            } else {
+                log.error("[refresh] \(email): post-save verify FAILED — could not re-read backup")
             }
         }
 
