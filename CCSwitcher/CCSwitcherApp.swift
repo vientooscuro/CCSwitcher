@@ -33,8 +33,10 @@ struct CCSwitcherApp: App {
         WindowGroup("CCSwitcherKeepalive") {
             HiddenWindowView()
                 .onAppear {
-                    // Update check is throttled to 24h internally.
-                    updateChecker.checkForUpdates(manual: false)
+                    // Sparkle's SPUStandardUpdaterController(startingUpdater: true)
+                    // schedules its own background update checks; no need to
+                    // call checkForUpdates here.
+                    _ = updateChecker
                     Task {
                         await appState.refresh()
                     }
