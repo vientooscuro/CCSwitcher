@@ -93,12 +93,6 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.tertiary)
 
-            Button(updateChecker.isChecking ? "Checking..." : "Check for Updates") {
-                updateChecker.checkForUpdates(manual: true)
-            }
-            .disabled(updateChecker.isChecking)
-            .padding(.top, 4)
-
             Spacer()
 
             Text("Easily switch between Claude Code accounts and monitor usage.")
