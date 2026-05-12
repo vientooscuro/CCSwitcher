@@ -206,15 +206,142 @@ final class ClaudeService: Sendable {
     }
 
     /// Extract access token string from a token JSON (keychain format).
-    /// Shape: `{ "claudeAiOauth": { "accessToken": "..." } }`.
+    /// Shape: `{ "claudeAiOauth": { "accessToken": "...", "refreshToken": "...", "expiresAt": <ms> } }`.
     private struct TokenEnvelope: Decodable {
-        struct OAuth: Decodable { let accessToken: String }
+        struct OAuth: Decodable {
+            let accessToken: String
+            let refreshToken: String?
+            // Stored as integer milliseconds since epoch in the keychain blob.
+            let expiresAt: Double?
+        }
         let claudeAiOauth: OAuth
     }
 
+    /// Parsed credentials extracted from a keychain token JSON.
+    struct TokenCredentials: Sendable {
+        let accessToken: String
+        let refreshToken: String?
+        let expiresAt: Date?
+    }
+
     static func extractAccessToken(from tokenJSON: String) -> String? {
-        guard let data = tokenJSON.data(using: .utf8) else { return nil }
-        return (try? JSONDecoder().decode(TokenEnvelope.self, from: data))?.claudeAiOauth.accessToken
+        extractCredentials(from: tokenJSON)?.accessToken
+    }
+
+    static func extractCredentials(from tokenJSON: String) -> TokenCredentials? {
+        guard let data = tokenJSON.data(using: .utf8),
+              let env = try? JSONDecoder().decode(TokenEnvelope.self, from: data) else { return nil }
+        let oauth = env.claudeAiOauth
+        let exp = oauth.expiresAt.map { Date(timeIntervalSince1970: $0 / 1000) }
+        return TokenCredentials(accessToken: oauth.accessToken, refreshToken: oauth.refreshToken, expiresAt: exp)
+    }
+
+    // MARK: - OAuth Token Refresh
+    //
+    // Performs the OAuth refresh-token grant against Claude's token endpoint
+    // directly, so an expired access token can be silently revived without
+    // making the user switch accounts. The endpoint URL and client_id below
+    // are the same values shipped inside the public `claude` CLI binary
+    // (see `strings $(which claude) | grep oauth/token`).
+    private static let oauthTokenURL = URL(string: "https://platform.claude.com/v1/oauth/token")!
+    private static let oauthClientId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+
+    enum RefreshError: Error {
+        /// No `refreshToken` in the stored envelope — the user must re-auth.
+        case noRefreshToken
+        /// Server rejected the refresh_token (HTTP 4xx). Often means the
+        /// token has been revoked or rotated past it; user must re-auth.
+        case invalidGrant
+        case network(String)
+        case decode(String)
+    }
+
+    /// Refreshes the OAuth access token in-place. Reads `refreshToken` from
+    /// `currentTokenJSON`, hits Claude's token endpoint, and returns a new
+    /// keychain-ready JSON blob with `accessToken` / `refreshToken` /
+    /// `expiresAt` replaced and every other field (`scopes`, `subscriptionType`,
+    /// `rateLimitTier`, …) preserved.
+    ///
+    /// Caller is responsible for writing `mergedJSON` back via
+    /// `KeychainService.writeClaudeToken` (active account) or
+    /// `saveAccountBackup` (inactive account).
+    func refreshOAuthToken(currentTokenJSON: String) async throws -> (accessToken: String, mergedJSON: String) {
+        guard let data = currentTokenJSON.data(using: .utf8),
+              var root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var oauth = root["claudeAiOauth"] as? [String: Any],
+              let refreshToken = oauth["refreshToken"] as? String,
+              !refreshToken.isEmpty
+        else {
+            log.warning("[refreshOAuthToken] No refresh_token in stored envelope")
+            throw RefreshError.noRefreshToken
+        }
+
+        var req = URLRequest(url: Self.oauthTokenURL)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        let payload: [String: String] = [
+            "grant_type": "refresh_token",
+            "refresh_token": refreshToken,
+            "client_id": Self.oauthClientId,
+        ]
+        req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+
+        log.info("[refreshOAuthToken] POST \(Self.oauthTokenURL.absoluteString)")
+
+        let respData: Data
+        let response: URLResponse
+        do {
+            (respData, response) = try await session.data(for: req)
+        } catch {
+            log.error("[refreshOAuthToken] Network error: \(error.localizedDescription)")
+            throw RefreshError.network(error.localizedDescription)
+        }
+
+        let http = response as? HTTPURLResponse
+        guard http?.statusCode == 200 else {
+            let bodyPreview = String(data: respData, encoding: .utf8)?.prefix(300) ?? ""
+            let status = http?.statusCode ?? -1
+            log.error("[refreshOAuthToken] HTTP \(status): \(bodyPreview)")
+            if (400...499).contains(status) {
+                throw RefreshError.invalidGrant
+            }
+            throw RefreshError.network("HTTP \(status)")
+        }
+
+        struct RefreshResponse: Decodable {
+            let accessToken: String
+            let refreshToken: String?
+            let expiresIn: Int?
+            enum CodingKeys: String, CodingKey {
+                case accessToken = "access_token"
+                case refreshToken = "refresh_token"
+                case expiresIn = "expires_in"
+            }
+        }
+        let parsed: RefreshResponse
+        do {
+            parsed = try JSONDecoder().decode(RefreshResponse.self, from: respData)
+        } catch {
+            log.error("[refreshOAuthToken] Decode failed: \(error.localizedDescription)")
+            throw RefreshError.decode(error.localizedDescription)
+        }
+
+        oauth["accessToken"] = parsed.accessToken
+        if let newRefresh = parsed.refreshToken { oauth["refreshToken"] = newRefresh }
+        if let ttlSeconds = parsed.expiresIn {
+            // Keep the format the keychain blob already uses: ms since epoch.
+            oauth["expiresAt"] = Int((Date().timeIntervalSince1970 + Double(ttlSeconds)) * 1000)
+        }
+        root["claudeAiOauth"] = oauth
+
+        guard let mergedData = try? JSONSerialization.data(withJSONObject: root),
+              let mergedJSON = String(data: mergedData, encoding: .utf8) else {
+            throw RefreshError.decode("re-serialize")
+        }
+
+        log.info("[refreshOAuthToken] OK, ttl=\(parsed.expiresIn ?? 0)s, rotatedRefresh=\(parsed.refreshToken != nil)")
+        return (parsed.accessToken, mergedJSON)
     }
 
     // MARK: - Account Switching

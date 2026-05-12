@@ -216,7 +216,7 @@ struct UsageDashboardView: View {
                 HStack {
                     Image(systemName: "exclamationmark.triangle")
                         .foregroundStyle(.yellow)
-                    Text("Token expired. Switch to this account in Claude Code to refresh.")
+                    Text("No usage data yet — refresh to fetch.")
                         .font(.caption)
                         .foregroundStyle(.textSecondary)
                     Spacer()

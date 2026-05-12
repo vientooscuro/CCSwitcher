@@ -493,10 +493,15 @@ final class AppState: ObservableObject {
                 if let usageError = error as? ClaudeService.UsageError {
                     switch usageError {
                     case .expired:
-                        log.warning("[fetchUsage] Token expired for \(r.email)")
+                        log.warning("[fetchUsage] Token expired for \(r.email), attempting OAuth refresh")
+                        if await refreshAndRetryUsage(accountId: r.accountId, isActive: r.isActive, email: r.email) {
+                            continue
+                        }
+                        // Direct refresh failed. For active accounts, fall back to
+                        // the delegated `claude auth status` path which uses the
+                        // CLI's own refresh logic (handles cases our direct grant
+                        // doesn't, e.g. transient network).
                         if r.isActive {
-                            // Active account: try a delegated refresh via `claude auth status`,
-                            // then retry the usage call once.
                             do {
                                 _ = try await claudeService.getAuthStatus()
                                 if let refreshedJSON = await keychain.readClaudeToken(),
@@ -510,12 +515,9 @@ final class AppState: ObservableObject {
                             } catch {
                                 log.error("[fetchUsage] Delegated refresh failed: \(error.localizedDescription)")
                             }
-                            accountUsage[r.accountId] = nil
-                            accountUsageErrors[r.accountId] = UsageErrorState(isExpired: true, isRateLimited: false, message: String(localized: "Token expired. Switch to refresh.", bundle: L10n.bundle))
-                        } else {
-                            accountUsage[r.accountId] = nil
-                            accountUsageErrors[r.accountId] = UsageErrorState(isExpired: true, isRateLimited: false, message: String(localized: "Token expired. Switch to this account to refresh.", bundle: L10n.bundle))
                         }
+                        accountUsage[r.accountId] = nil
+                        accountUsageErrors[r.accountId] = UsageErrorState(isExpired: true, isRateLimited: false, message: String(localized: "Session expired. Please re-authenticate this account in Claude Code.", bundle: L10n.bundle))
 
                     case .network(let msg) where msg.contains("429"):
                         accountUsage[r.accountId] = nil
@@ -530,6 +532,61 @@ final class AppState: ObservableObject {
                     accountUsageErrors[r.accountId] = UsageErrorState(isExpired: false, isRateLimited: false, message: String(localized: "Could not fetch usage: \(error.localizedDescription)", bundle: L10n.bundle))
                 }
             }
+        }
+    }
+
+    /// Try to refresh an expired OAuth token in-place (no account switch
+    /// required) and retry the usage call. Works for both the active account
+    /// (writes through `KeychainService.writeClaudeToken`) and inactive
+    /// accounts (writes through `saveAccountBackup`). Returns true on full
+    /// recovery — `accountUsage` / `accountUsageErrors` have been updated.
+    private func refreshAndRetryUsage(accountId: UUID, isActive: Bool, email: String) async -> Bool {
+        let storedJSON: String?
+        if isActive {
+            storedJSON = await keychain.readClaudeToken()
+        } else {
+            storedJSON = await keychain.getAccountBackup(forAccountId: accountId.uuidString)?.token
+        }
+        guard let storedJSON else {
+            log.warning("[refresh] No stored token for \(email)")
+            return false
+        }
+
+        let refreshed: (accessToken: String, mergedJSON: String)
+        do {
+            refreshed = try await claudeService.refreshOAuthToken(currentTokenJSON: storedJSON)
+        } catch {
+            log.error("[refresh] OAuth refresh failed for \(email): \(error)")
+            return false
+        }
+
+        if isActive {
+            let ok = await keychain.writeClaudeToken(refreshed.mergedJSON)
+            if !ok {
+                log.error("[refresh] writeClaudeToken failed for \(email)")
+                return false
+            }
+        } else {
+            guard let backup = await keychain.getAccountBackup(forAccountId: accountId.uuidString) else {
+                log.error("[refresh] Backup vanished for \(email) during refresh")
+                return false
+            }
+            let ok = await keychain.saveAccountBackup(token: refreshed.mergedJSON, oauthAccount: backup.oauthAccount, forAccountId: accountId.uuidString)
+            if !ok {
+                log.error("[refresh] saveAccountBackup failed for \(email)")
+                return false
+            }
+        }
+
+        do {
+            let usage = try await claudeService.getUsageLimits(accessToken: refreshed.accessToken)
+            accountUsage[accountId] = usage
+            accountUsageErrors[accountId] = nil
+            log.info("[refresh] Recovered \(email) via direct OAuth refresh")
+            return true
+        } catch {
+            log.error("[refresh] Retry after refresh failed for \(email): \(error)")
+            return false
         }
     }
 
