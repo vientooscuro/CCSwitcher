@@ -170,6 +170,10 @@ final class ClaudeService: Sendable {
 
     enum UsageError: Error {
         case expired
+        /// HTTP 429 from the usage endpoint. `retryAfter` is the suggested
+        /// back-off in seconds (parsed from the `Retry-After` header, or 60s
+        /// when the server didn't send one).
+        case rateLimited(retryAfter: TimeInterval)
         case network(String)
         case decode(String)
     }
@@ -187,12 +191,21 @@ final class ClaudeService: Sendable {
         let httpResponse = response as? HTTPURLResponse
         guard httpResponse?.statusCode == 200 else {
             let responseString = String(data: responseData, encoding: .utf8) ?? ""
-            log.error("[getUsageLimits] HTTP \(httpResponse?.statusCode ?? 0)")
+            let status = httpResponse?.statusCode ?? 0
+            log.error("[getUsageLimits] HTTP \(status)")
 
-            if httpResponse?.statusCode == 401 || responseString.contains("token_expired") {
+            if status == 401 || responseString.contains("token_expired") {
                 throw UsageError.expired
             }
-            throw UsageError.network("HTTP \(httpResponse?.statusCode ?? 0)")
+            if status == 429 {
+                // Honor Retry-After when present (seconds or HTTP-date; we
+                // only handle the integer-seconds form here).
+                let retryAfter: TimeInterval = (httpResponse?.value(forHTTPHeaderField: "Retry-After"))
+                    .flatMap(TimeInterval.init) ?? 60
+                log.warning("[getUsageLimits] 429 rate limited, Retry-After=\(retryAfter)s")
+                throw UsageError.rateLimited(retryAfter: retryAfter)
+            }
+            throw UsageError.network("HTTP \(status)")
         }
 
         do {

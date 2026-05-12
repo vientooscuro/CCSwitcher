@@ -286,7 +286,7 @@ struct MainMenuView: View {
             Spacer()
 
             Button {
-                Task { await appState.refresh() }
+                Task { await appState.refresh(force: true) }
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .font(.caption)

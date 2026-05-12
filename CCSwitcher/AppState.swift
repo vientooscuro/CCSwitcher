@@ -54,6 +54,20 @@ final class AppState: ObservableObject {
 
     private var refreshIntervalSeconds: TimeInterval = 300
 
+    /// Per-account back-off: when a usage request returns 429, the account
+    /// is excluded from `fetchAllAccountUsage` until this date passes.
+    /// Cleared on success.
+    private var accountUsageRateLimitedUntil: [UUID: Date] = [:]
+
+    /// Global throttle. `fetchAllAccountUsage` is a no-op if `refresh()` was
+    /// called less than `Self.usageMinInterval` ago — this stops the menu-
+    /// open + manual-button + timer combo from stacking up bursts of N
+    /// parallel requests against the rate-limited usage endpoint.
+    private var lastUsageFetchAttempt: Date?
+    private static let usageMinInterval: TimeInterval = 30
+    /// Cap on concurrent in-flight usage requests inside one fetch round.
+    private static let usageMaxConcurrency = 3
+
     // MARK: - Initialization
 
     init() {
@@ -79,7 +93,7 @@ final class AppState: ObservableObject {
     /// - Parameter knownStatus: pass a freshly-obtained `AuthStatus` to skip
     ///   re-running `claude auth status` (an expensive CLI fork). Used by
     ///   `switchTo` and `loginNewAccount` to avoid double-querying.
-    func refresh(knownStatus: AuthStatus? = nil) async {
+    func refresh(knownStatus: AuthStatus? = nil, force: Bool = false) async {
         guard !isLoggingIn else {
             log.info("[refresh] Skipping: login in progress")
             return
@@ -105,7 +119,10 @@ final class AppState: ObservableObject {
             }
         }
 
-        await fetchAllAccountUsage()
+        // Login/switch/reauth pass `knownStatus` — those flows have to refresh
+        // immediately because account state actually changed. The user-clicked
+        // refresh button passes `force: true` for the same reason.
+        await fetchAllAccountUsage(force: force || knownStatus != nil)
         lastUsageRefresh = Date()
 
         // Heavy JSONL parsing + session scan — all off main, then publish results.
@@ -439,12 +456,32 @@ final class AppState: ObservableObject {
 
     // MARK: - Usage
 
-    private func fetchAllAccountUsage() async {
-        accountUsageErrors.removeAll()
+    private func fetchAllAccountUsage(force: Bool = false) async {
+        // Global throttle: collapse menu-open + manual-button + timer bursts
+        // into one call per `usageMinInterval`. `force` lets login/switch
+        // flows refresh immediately when account state actually changed.
+        let now = Date()
+        if !force, let last = lastUsageFetchAttempt, now.timeIntervalSince(last) < Self.usageMinInterval {
+            log.debug("[fetchUsage] Skipped (cooldown — last attempt \(Int(now.timeIntervalSince(last)))s ago)")
+            return
+        }
+        lastUsageFetchAttempt = now
 
         // Collect tokens up front (sequentially — keychain is a serial actor).
+        // Accounts that are still in a per-account 429 back-off window are
+        // skipped: the prior `accountUsageErrors[id]` entry is preserved so
+        // the UI keeps showing the rate-limit message.
         var requests: [(account: Account, accessToken: String)] = []
+        var freshErrors: [UUID: UsageErrorState] = [:]
         for account in accounts {
+            if let until = accountUsageRateLimitedUntil[account.id], until > now {
+                let remaining = Int(until.timeIntervalSince(now))
+                log.info("[fetchUsage] Skipping \(account.email) — rate limited for \(remaining)s more")
+                if let existing = accountUsageErrors[account.id] {
+                    freshErrors[account.id] = existing
+                }
+                continue
+            }
             let tokenJSON: String?
             if account.isActive {
                 tokenJSON = await keychain.readClaudeToken()
@@ -457,8 +494,8 @@ final class AppState: ObservableObject {
             }
             requests.append((account, accessToken))
         }
+        accountUsageErrors = freshErrors
 
-        // Fire all HTTP requests in parallel.
         struct Result {
             let accountId: UUID
             let isActive: Bool
@@ -466,20 +503,29 @@ final class AppState: ObservableObject {
             let payload: Swift.Result<UsageAPIResponse, Error>
         }
 
-        let results: [Result] = await withTaskGroup(of: Result.self) { group in
-            for req in requests {
-                group.addTask { [claudeService] in
-                    do {
-                        let usage = try await claudeService.getUsageLimits(accessToken: req.accessToken)
-                        return Result(accountId: req.account.id, isActive: req.account.isActive, email: req.account.email, payload: .success(usage))
-                    } catch {
-                        return Result(accountId: req.account.id, isActive: req.account.isActive, email: req.account.email, payload: .failure(error))
+        // Cap concurrency: feeding 5+ parallel requests at the same instant
+        // is the easiest way to trip the per-IP/per-user rate limit on the
+        // usage endpoint. Process in chunks of `usageMaxConcurrency`.
+        var results: [Result] = []
+        let chunkSize = Self.usageMaxConcurrency
+        for chunkStart in stride(from: 0, to: requests.count, by: chunkSize) {
+            let chunk = Array(requests[chunkStart..<min(chunkStart + chunkSize, requests.count)])
+            let chunkResults: [Result] = await withTaskGroup(of: Result.self) { group in
+                for req in chunk {
+                    group.addTask { [claudeService] in
+                        do {
+                            let usage = try await claudeService.getUsageLimits(accessToken: req.accessToken)
+                            return Result(accountId: req.account.id, isActive: req.account.isActive, email: req.account.email, payload: .success(usage))
+                        } catch {
+                            return Result(accountId: req.account.id, isActive: req.account.isActive, email: req.account.email, payload: .failure(error))
+                        }
                     }
                 }
+                var collected: [Result] = []
+                for await r in group { collected.append(r) }
+                return collected
             }
-            var collected: [Result] = []
-            for await r in group { collected.append(r) }
-            return collected
+            results.append(contentsOf: chunkResults)
         }
 
         for r in results {
@@ -487,6 +533,7 @@ final class AppState: ObservableObject {
             case .success(let usage):
                 accountUsage[r.accountId] = usage
                 accountUsageErrors[r.accountId] = nil
+                accountUsageRateLimitedUntil[r.accountId] = nil
                 log.info("[fetchUsage] \(r.email): session=\(usage.fiveHour?.utilization ?? -1)%, weekly=\(usage.sevenDay?.utilization ?? -1)%")
 
             case .failure(let error):
@@ -519,9 +566,14 @@ final class AppState: ObservableObject {
                         accountUsage[r.accountId] = nil
                         accountUsageErrors[r.accountId] = UsageErrorState(isExpired: true, isRateLimited: false, message: String(localized: "Session expired. Please re-authenticate this account in Claude Code.", bundle: L10n.bundle))
 
-                    case .network(let msg) where msg.contains("429"):
-                        accountUsage[r.accountId] = nil
-                        accountUsageErrors[r.accountId] = UsageErrorState(isExpired: false, isRateLimited: true, message: String(localized: "API Rate Limited. Try again later.", bundle: L10n.bundle))
+                    case .rateLimited(let retryAfter):
+                        let until = Date().addingTimeInterval(retryAfter)
+                        accountUsageRateLimitedUntil[r.accountId] = until
+                        log.warning("[fetchUsage] \(r.email) rate-limited, backing off \(Int(retryAfter))s")
+                        // Keep the previously fetched usage visible — a 429
+                        // doesn't invalidate prior numbers, only blocks
+                        // refreshes. Show the rate-limit message in addition.
+                        accountUsageErrors[r.accountId] = UsageErrorState(isExpired: false, isRateLimited: true, message: String(localized: "API rate-limited. Retrying automatically.", bundle: L10n.bundle))
 
                     default:
                         accountUsage[r.accountId] = nil
