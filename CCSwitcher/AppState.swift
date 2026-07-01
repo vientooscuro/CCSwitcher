@@ -62,11 +62,19 @@ final class AppState: ObservableObject {
     private var accountUsageRateLimitedUntil: [UUID: Date] = [:]
 
     /// Accounts whose stored refresh_token has been rejected by the OAuth
-    /// server (`invalid_grant`). Re-trying the same broken token every 5
-    /// minutes just wastes requests, so the account is skipped until the
-    /// user clicks the manual refresh button (which clears the set) or
-    /// switches to the account and lets the CLI re-issue credentials.
+    /// server (`invalid_grant`). Re-trying the same broken token just wastes
+    /// requests and is the fastest way to trip the usage endpoint's 429, so
+    /// the account is skipped until it is explicitly re-authenticated or
+    /// switched to (both re-issue credentials and clear the flag). It is NOT
+    /// cleared by a plain manual refresh — that only re-poked the dead token.
     private var accountRefreshTokenInvalid: Set<UUID> = []
+
+    /// Per-account timestamp of the last usage fetch attempt. Inactive
+    /// accounts change slowly and don't need polling every cycle, so they are
+    /// skipped unless `Self.inactiveUsageMinInterval` has elapsed (or the
+    /// caller forces). The active account is always fetched.
+    private var accountUsageLastAttempt: [UUID: Date] = [:]
+    private static let inactiveUsageMinInterval: TimeInterval = 15 * 60
 
     /// In-flight refresh tasks keyed by accountId. Two simultaneous
     /// `fetchAllAccountUsage` invocations on the same expired token would
@@ -407,6 +415,9 @@ final class AppState: ObservableObject {
             activeAccount = account
             scheduleSave()
 
+            // Fresh credentials in place — drop any stale block so usage is
+            // retried immediately for the account we just switched to.
+            clearUsageBlocks(for: account.id)
             await refresh(knownStatus: status)
             log.info("[switchTo] ===== Switch completed =====")
         } catch {
@@ -464,6 +475,10 @@ final class AppState: ObservableObject {
                 scheduleSave()
             }
 
+            // Fresh credentials captured — clear the invalid-refresh / 429
+            // block so the account recovers on the next fetch instead of
+            // staying stuck behind a stale back-off from the old token.
+            clearUsageBlocks(for: account.id)
             isLoggingIn = false
             await refresh(knownStatus: status)
             log.info("[reauth] ===== Re-authentication completed =====")
@@ -476,6 +491,17 @@ final class AppState: ObservableObject {
 
     // MARK: - Usage
 
+    /// Clear all per-account usage blocks (429 back-off, invalid-refresh flag,
+    /// poll throttle) for one account. Called when the user explicitly re-issues
+    /// that account's credentials (switch / re-auth) so the fresh token is
+    /// retried on the very next fetch instead of staying stuck behind a stale
+    /// block. Other accounts are left untouched.
+    private func clearUsageBlocks(for accountId: UUID) {
+        accountUsageRateLimitedUntil[accountId] = nil
+        accountRefreshTokenInvalid.remove(accountId)
+        accountUsageLastAttempt[accountId] = nil
+    }
+
     private func fetchAllAccountUsage(force: Bool = false) async {
         // Global throttle: collapse menu-open + manual-button + timer bursts
         // into one call per `usageMinInterval`. `force` lets login/switch
@@ -486,11 +512,6 @@ final class AppState: ObservableObject {
             return
         }
         lastUsageFetchAttempt = now
-
-        // Manual refresh (force=true) is the user's way to say "try again"
-        // for accounts that previously bailed with invalid_grant. Reset the
-        // invalid set so those accounts get one more attempt.
-        if force { accountRefreshTokenInvalid.removeAll() }
 
         // Collect tokens up front (sequentially — keychain is a serial actor).
         // Accounts that are still in a per-account 429 back-off window OR
@@ -509,7 +530,18 @@ final class AppState: ObservableObject {
                 continue
             }
             if accountRefreshTokenInvalid.contains(account.id) {
-                log.info("[fetchUsage] Skipping \(account.email) — refresh_token invalid, awaiting manual refresh")
+                log.info("[fetchUsage] Skipping \(account.email) — refresh_token invalid, awaiting re-auth")
+                if let existing = accountUsageErrors[account.id] {
+                    freshErrors[account.id] = existing
+                }
+                continue
+            }
+            // Inactive accounts change slowly; poll them at most once per
+            // `inactiveUsageMinInterval` to keep the endpoint load (and 429
+            // risk) down. The active account and forced fetches always go.
+            if !force, !account.isActive,
+               let last = accountUsageLastAttempt[account.id],
+               now.timeIntervalSince(last) < Self.inactiveUsageMinInterval {
                 if let existing = accountUsageErrors[account.id] {
                     freshErrors[account.id] = existing
                 }
@@ -525,6 +557,7 @@ final class AppState: ObservableObject {
                 log.warning("[fetchUsage] No token for \(account.email), skipping")
                 continue
             }
+            accountUsageLastAttempt[account.id] = now
             requests.append((account, accessToken))
         }
         accountUsageErrors = freshErrors
