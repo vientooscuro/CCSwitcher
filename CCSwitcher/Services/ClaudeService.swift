@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 private let log = FileLog("Claude")
 
@@ -16,15 +17,16 @@ struct DetectedClaudePath: Hashable, Identifiable {
 final class ClaudeService: @unchecked Sendable {
     static let shared = ClaudeService()
 
-    private let lock = NSLock()
-    private var _claudePath: String
-    /// Monotonic counter to detect out-of-order setPath completions.
-    private var _setPathGeneration: UInt64 = 0
+    private struct PathState {
+        var claudePath: String
+        /// Monotonic counter to detect out-of-order setPath completions.
+        var setPathGeneration: UInt64 = 0
+    }
+    private let pathState: OSAllocatedUnfairLock<PathState>
 
     /// Currently active path. Thread-safe.
     var claudePath: String {
-        lock.lock(); defer { lock.unlock() }
-        return _claudePath
+        pathState.withLock { $0.claudePath }
     }
 
     /// Custom URLSession with a 10s request timeout — `URLSession.shared`'s
@@ -33,18 +35,20 @@ final class ClaudeService: @unchecked Sendable {
     private let session: URLSession
 
     private init() {
+        let initialPath: String
         let preference = UserDefaults.standard.string(forKey: kClaudeBinaryPathPreferenceKey) ?? ""
         if !preference.isEmpty, FileManager.default.isExecutableFile(atPath: preference) {
-            self._claudePath = preference
+            initialPath = preference
             log.info("Claude binary path: \(preference) (user preference)")
         } else {
             let auto = Self.autoSelectedPath()
-            self._claudePath = auto.path
+            initialPath = auto.path
             log.info("Claude binary path: \(auto.path) (\(auto.source))")
             if !preference.isEmpty {
                 log.warning("Saved preference \(preference) is no longer valid; falling back to auto")
             }
         }
+        self.pathState = OSAllocatedUnfairLock(initialState: PathState(claudePath: initialPath))
 
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 10
@@ -58,10 +62,10 @@ final class ClaudeService: @unchecked Sendable {
     /// Auto-resolution happens outside the lock (can take ~3s via shell PATH lookup);
     /// a generation counter ensures a slower call cannot overwrite a faster, later one.
     func setPath(_ override: String?) {
-        lock.lock()
-        _setPathGeneration &+= 1
-        let myGen = _setPathGeneration
-        lock.unlock()
+        let myGen = pathState.withLock { state -> UInt64 in
+            state.setPathGeneration &+= 1
+            return state.setPathGeneration
+        }
 
         let resolved: (String, String)
         if let override, !override.isEmpty, FileManager.default.isExecutableFile(atPath: override) {
@@ -71,15 +75,18 @@ final class ClaudeService: @unchecked Sendable {
             resolved = (auto.path, "auto/\(auto.source)")
         }
 
-        lock.lock()
-        guard myGen == _setPathGeneration else {
-            lock.unlock()
-            log.info("[setPath] superseded by newer call, discarding \(resolved.0)")
-            return
+        // Auto-resolution above can take ~3s via shell PATH lookup; a slower call
+        // must not overwrite a faster, later one, so re-check the generation.
+        let applied = pathState.withLock { state -> Bool in
+            guard myGen == state.setPathGeneration else { return false }
+            state.claudePath = resolved.0
+            return true
         }
-        _claudePath = resolved.0
-        lock.unlock()
-        log.info("[setPath] \(resolved.1): \(resolved.0)")
+        if applied {
+            log.info("[setPath] \(resolved.1): \(resolved.0)")
+        } else {
+            log.info("[setPath] superseded by newer call, discarding \(resolved.0)")
+        }
     }
 
     // MARK: - Detection
