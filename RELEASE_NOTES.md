@@ -1,29 +1,17 @@
-### More accurate usage cost
+### New models & upstream sync
 
-CCSwitcher now matches the latest `ccusage` (20.0.9) to the cent. Anthropic bills **1-hour** prompt-cache writes at 2× the base rate, and Claude Code uses 1-hour caching for almost all of its cache writes — the previous calculation priced them at the lower 5-minute rate, undercounting your daily cost by roughly **9%**. Costs are now correct, and duplicate streaming rows are counted the same way ccusage 20.x counts them.
+- **Sonnet 5, Fable 5 and Opus 4.8** are now recognized in cost tracking, with correct per-token pricing (offline-ready from the bundled LiteLLM snapshot, revalidated over the network each cycle).
+- Merged upstream v1.10.0: cost math re-derived to match ccusage 20.0.9, live LiteLLM pricing with ETag revalidation, Fable shown in the cost breakdown, configurable iStats-style menu-bar modules, and a Claude CLI binary picker in Settings.
+- Fork extras kept: silent OAuth token refresh (no account switch), per-account 429 back-off, and a faster lock on Claude path resolution.
 
-### Fable shows up by name
-
-The new Claude **Fable** model now appears as "Fable" in the cost breakdown, the activity dashboard, and the widget — instead of the raw model id.
-
-### Faster refreshes
-
-Fixed a bug where the parsed-session cache never saved, forcing a full re-parse of every session log on each refresh. The cache now persists, so refreshes are near-instant.
+**Full Changelog**: https://github.com/vientooscuro/CCSwitcher/commits/v1.11.0
 
 ---
 
-### 用量费用更准确
+### 新模型与上游同步
 
-CCSwitcher 现在与最新版 `ccusage`(20.0.9)逐分对齐。Anthropic 对**「1 小时」**提示词缓存写入按基础价的 2× 计费,而 Claude Code 几乎所有缓存写入都使用 1 小时缓存——之前按更低的「5 分钟」价计算,导致每日费用少算约 **9%**。现已修正,重复的流式记录也按 ccusage 20.x 的方式计数。
+- 成本统计现已识别 **Sonnet 5、Fable 5 和 Opus 4.8**，并采用正确的按 token 计价（内置 LiteLLM 快照支持离线，且每个周期通过网络重新校验）。
+- 合并上游 v1.10.0：成本计算重新对齐 ccusage 20.0.9、带 ETag 重校验的实时 LiteLLM 计价、成本明细中显示 Fable、可配置的 iStats 风格菜单栏模块，以及设置中的 Claude CLI 可执行文件选择器。
+- 保留分支特性：静默刷新 OAuth 令牌（无需切换账号）、按账号的 429 退避，以及更快的 Claude 路径解析锁。
 
-### Fable 正确显示
-
-全新的 Claude **Fable** 模型现在会以「Fable」显示在费用明细、活动面板和小组件中,不再显示原始模型 id。
-
-### 刷新更快
-
-修复了解析缓存从不落盘的问题——之前每次刷新都要全量重新解析所有会话日志。现在缓存正常持久化,刷新接近瞬时。
-
----
-
-**Full Changelog**: https://github.com/XueshiQiao/CCSwitcher/compare/v1.9.0...v1.10.0
+**Full Changelog**: https://github.com/vientooscuro/CCSwitcher/commits/v1.11.0
