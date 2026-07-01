@@ -6,7 +6,6 @@ struct SettingsView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var updateChecker: UpdateChecker
     @AppStorage("refreshInterval") private var refreshInterval: Double = 300
-    @AppStorage("showAccountName") private var showAccountName = true
     @AppStorage("showFullEmail") private var showFullEmail = false
     @AppStorage("appLanguage") private var appLanguage = "auto"
     @State private var launchAtLogin = false
@@ -18,12 +17,22 @@ struct SettingsView: View {
                     Label("General", systemImage: "gear")
                 }
 
+            menuBarTab
+                .tabItem {
+                    Label("Menu Bar", systemImage: "menubar.rectangle")
+                }
+
+            ClaudeCLITabView()
+                .tabItem {
+                    Label("Claude CLI", systemImage: "terminal")
+                }
+
             aboutTab
                 .tabItem {
                     Label("About", systemImage: "info.circle")
                 }
         }
-        .frame(width: 450, height: 300)
+        .frame(width: 520, height: 440)
         .onAppear {
             launchAtLogin = SMAppService.mainApp.status == .enabled
         }
@@ -46,9 +55,11 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Appearance") {
-                Toggle("Show account name in menu bar", isOn: $showAccountName)
+            Section("Account display") {
                 Toggle("Show full email address", isOn: $showFullEmail)
+            }
+
+            Section("Appearance") {
                 Picker("Language", selection: $appLanguage) {
                     Text("Automatic").tag("auto")
                     Divider()
@@ -68,6 +79,19 @@ struct SettingsView: View {
                     .onChange(of: launchAtLogin) { _, newValue in
                         toggleLaunchAtLogin(newValue)
                     }
+            }
+        }
+        .formStyle(.grouped)
+        .padding()
+    }
+
+    // MARK: - Menu Bar Tab
+
+    private var menuBarTab: some View {
+        Form {
+            Section {
+                MenuBarModulesSettingsView()
+                    .environmentObject(appState)
             }
         }
         .formStyle(.grouped)

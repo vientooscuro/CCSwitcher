@@ -20,6 +20,8 @@ final class AppState: ObservableObject {
     @Published var lastUsageRefresh: Date?
     @Published var costSummary: CostSummary = .empty
     @Published var activityStats: ActivityStats = .empty
+    @Published var usageSummary: UsageSummary = .empty
+    @Published var recentActivity: [DailyActivity] = []
 
     struct UsageErrorState {
         let isExpired: Bool
@@ -139,16 +141,21 @@ final class AppState: ObservableObject {
         await fetchAllAccountUsage(force: force || knownStatus != nil)
         lastUsageRefresh = Date()
 
-        // Heavy JSONL parsing + session scan — all off main, then publish results.
-        async let sessions = statsParser.getActiveSessions()
-        async let cost = costParser.getCostSummary()
-        async let activity = activityParser.getTodayStats()
-        let (sessionsResult, costResult, activityResult) = await (sessions, cost, activity)
-        activeSessions = sessionsResult
-        costSummary = costResult
-        activityStats = activityResult
+        // Stats come from ~/.claude JSON caches (synchronous, cheap).
+        usageSummary = statsParser.getUsageSummary()
+        recentActivity = statsParser.getRecentActivity(days: 7)
+        activeSessions = statsParser.getActiveSessions()
 
-        log.debug("[refresh] \(self.activeSessions.count) sessions, today=$\(String(format: "%.2f", costResult.todayCost)) turns=\(activityResult.conversationTurns)")
+        // Heavy JSONL parsing: walk the filesystem once via the shared cache,
+        // then pull aggregated outputs. The cache actor runs off the main
+        // thread, so awaiting these does not block the UI.
+        await SessionParseCacheV2.shared.refreshFromFilesystem()
+        let cost = await costParser.getCostSummary()
+        let activity = await activityParser.getTodayStats()
+        costSummary = cost
+        activityStats = activity
+
+        log.info("[refresh] Usage: weekly=\(self.usageSummary.weeklyMessages) msgs, \(self.activeSessions.count) active sessions, today=$\(String(format: "%.2f", cost.todayCost)) turns=\(activity.conversationTurns)")
 
         updateWidgetData()
         isLoading = false
@@ -156,11 +163,10 @@ final class AppState: ObservableObject {
 
     func startAutoRefresh(interval: TimeInterval = 300) {
         refreshIntervalSeconds = interval
-        // Only actually run the timer when the menu is visible. The visibility
-        // hooks (`menuDidAppear`/`menuDidDisappear`) drive scheduling.
-        if menuVisible {
-            scheduleRefreshTimer()
-        }
+        // The menu-bar strip (StatusItemController) is always on screen, so the
+        // periodic refresh runs unconditionally rather than being gated on a
+        // popover being open.
+        scheduleRefreshTimer()
     }
 
     func stopAutoRefresh() {

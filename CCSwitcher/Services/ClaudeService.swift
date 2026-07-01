@@ -2,46 +2,48 @@ import Foundation
 
 private let log = FileLog("Claude")
 
+/// UserDefaults key holding the user's preferred Claude CLI path (empty = auto).
+let kClaudeBinaryPathPreferenceKey = "claudeBinaryPathPreference"
+
+/// A claude binary discovered on this Mac.
+struct DetectedClaudePath: Hashable, Identifiable {
+    let path: String
+    let label: String
+    var id: String { path }
+}
+
 /// Interacts with the Claude CLI to get auth status and manage accounts.
-final class ClaudeService: Sendable {
+final class ClaudeService: @unchecked Sendable {
     static let shared = ClaudeService()
 
-    /// Resolved lazily on a background queue so app launch never blocks on
-    /// `/bin/zsh -ilc` (which can take seconds with a heavy `.zshrc`).
-    private let pathTask: Task<String, Never>
+    private let lock = NSLock()
+    private var _claudePath: String
+    /// Monotonic counter to detect out-of-order setPath completions.
+    private var _setPathGeneration: UInt64 = 0
 
-    /// Pre-built process environment (PATH + HOME). Computed once after path
-    /// resolution and reused for every `runClaude` invocation.
-    private let envTask: Task<[String: String], Never>
+    /// Currently active path. Thread-safe.
+    var claudePath: String {
+        lock.lock(); defer { lock.unlock() }
+        return _claudePath
+    }
 
     /// Custom URLSession with a 10s request timeout — `URLSession.shared`'s
-    /// default 60s causes `refresh()` to hang for up to a minute when the API
-    /// endpoint is unresponsive.
+    /// default 60s causes usage fetch / token refresh to hang for up to a
+    /// minute when the API endpoint is unresponsive.
     private let session: URLSession
 
     private init() {
-        let curated = Self.curatedPaths()
-        let immediate = curated.first { FileManager.default.fileExists(atPath: $0) }
-
-        // Path resolution: try curated paths synchronously (cheap — just
-        // `fileExists`), and only fork zsh in the background if we have to.
-        let pathTask = Task<String, Never>.detached(priority: .userInitiated) {
-            if let immediate {
-                log.info("Claude binary path: \(immediate) (curated)")
-                return immediate
+        let preference = UserDefaults.standard.string(forKey: kClaudeBinaryPathPreferenceKey) ?? ""
+        if !preference.isEmpty, FileManager.default.isExecutableFile(atPath: preference) {
+            self._claudePath = preference
+            log.info("Claude binary path: \(preference) (user preference)")
+        } else {
+            let auto = Self.autoSelectedPath()
+            self._claudePath = auto.path
+            log.info("Claude binary path: \(auto.path) (\(auto.source))")
+            if !preference.isEmpty {
+                log.warning("Saved preference \(preference) is no longer valid; falling back to auto")
             }
-            if let shellPath = Self.shellPathLookup() {
-                log.info("Claude binary path: \(shellPath) (resolved via user shell PATH)")
-                return shellPath
-            }
-            log.warning("Claude binary not found; falling back to bare 'claude'")
-            return "claude"
-        }
-        self.pathTask = pathTask
-
-        self.envTask = Task<[String: String], Never>.detached(priority: .userInitiated) {
-            let path = await pathTask.value
-            return Self.buildEnvironment(claudePath: path)
         }
 
         let config = URLSessionConfiguration.default
@@ -51,31 +53,108 @@ final class ClaudeService: Sendable {
         self.session = URLSession(configuration: config)
     }
 
-    // MARK: - Path discovery
+    /// Update the runtime claude path. Pass nil or empty to revert to auto-detection.
+    /// Does NOT validate — caller (Settings UI) is expected to validate before calling.
+    /// Auto-resolution happens outside the lock (can take ~3s via shell PATH lookup);
+    /// a generation counter ensures a slower call cannot overwrite a faster, later one.
+    func setPath(_ override: String?) {
+        lock.lock()
+        _setPathGeneration &+= 1
+        let myGen = _setPathGeneration
+        lock.unlock()
 
-    private static func curatedPaths() -> [String] {
-        let home = NSHomeDirectory()
-        return [
-            "/usr/local/bin/claude",
-            "/opt/homebrew/bin/claude",
-            "/opt/local/bin/claude",
-            "\(home)/.local/bin/claude",
-            "\(home)/.claude/local/claude",
-            "\(home)/.npm-global/bin/claude",
-            "\(home)/.volta/bin/claude",
-            "\(home)/Library/pnpm/claude",
-            "\(home)/.bun/bin/claude",
-            "\(home)/.yarn/bin/claude"
-        ] + nvmPaths()
+        let resolved: (String, String)
+        if let override, !override.isEmpty, FileManager.default.isExecutableFile(atPath: override) {
+            resolved = (override, "override")
+        } else {
+            let auto = Self.autoSelectedPath()
+            resolved = (auto.path, "auto/\(auto.source)")
+        }
+
+        lock.lock()
+        guard myGen == _setPathGeneration else {
+            lock.unlock()
+            log.info("[setPath] superseded by newer call, discarding \(resolved.0)")
+            return
+        }
+        _claudePath = resolved.0
+        lock.unlock()
+        log.info("[setPath] \(resolved.1): \(resolved.0)")
     }
 
-    private static func nvmPaths() -> [String] {
+    // MARK: - Detection
+
+    /// Today's 3-tier fallback: curated → shell PATH → bare "claude".
+    static func autoSelectedPath() -> (path: String, source: String) {
+        for candidate in curatedPathCandidates() where FileManager.default.fileExists(atPath: candidate) {
+            return (candidate, "curated")
+        }
+        if let shellPath = shellPathLookup() {
+            return (shellPath, "shell PATH")
+        }
+        return ("claude", "fallback")
+    }
+
+    /// All claude binaries that actually exist on this Mac, deduplicated by
+    /// resolved symlink target, ordered by discovery source.
+    static func detectedPaths() -> [DetectedClaudePath] {
+        var result: [DetectedClaudePath] = []
+        var seenResolved = Set<String>()
+
+        func add(_ path: String, _ label: String) {
+            guard FileManager.default.fileExists(atPath: path) else { return }
+            let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+            guard !seenResolved.contains(resolved) else { return }
+            seenResolved.insert(resolved)
+            result.append(DetectedClaudePath(path: path, label: label))
+        }
+
+        for (path, label) in curatedLabeledCandidates() {
+            add(path, label)
+        }
+        for (path, label) in nvmLabeledCandidates() {
+            add(path, label)
+        }
+        if let shellPath = shellPathLookup() {
+            add(shellPath, "From shell PATH")
+        }
+
+        return result
+    }
+
+    private static func curatedPathCandidates() -> [String] {
+        curatedLabeledCandidates().map { $0.0 } + nvmLabeledCandidates().map { $0.0 }
+    }
+
+    private static func curatedLabeledCandidates() -> [(String, String)] {
+        let home = NSHomeDirectory()
+        return [
+            ("/usr/local/bin/claude", "/usr/local/bin"),
+            ("/opt/homebrew/bin/claude", "Homebrew"),
+            ("/opt/local/bin/claude", "MacPorts"),
+            ("\(home)/.local/bin/claude", "Anthropic native installer"),
+            ("\(home)/.claude/local/claude", "Anthropic migrate installer"),
+            ("\(home)/.npm-global/bin/claude", "npm global"),
+            ("\(home)/.volta/bin/claude", "Volta"),
+            ("\(home)/Library/pnpm/claude", "pnpm"),
+            ("\(home)/.bun/bin/claude", "Bun"),
+            ("\(home)/.yarn/bin/claude", "Yarn"),
+        ]
+    }
+
+    /// Discover Claude binaries installed via NVM (Node Version Manager).
+    /// NVM stores node versions at ~/.nvm/versions/node/<version>/bin/.
+    private static func nvmLabeledCandidates() -> [(String, String)] {
         let nvmDir = "\(NSHomeDirectory())/.nvm/versions/node"
         guard FileManager.default.fileExists(atPath: nvmDir) else { return [] }
-        guard let versions = try? FileManager.default.contentsOfDirectory(atPath: nvmDir) else { return [] }
+        guard let versions = try? FileManager.default.contentsOfDirectory(atPath: nvmDir) else {
+            log.warning("[nvmLabeledCandidates] NVM directory exists but could not be read: \(nvmDir)")
+            return []
+        }
         return versions
             .filter { !$0.hasPrefix(".") }
-            .map { "\(nvmDir)/\($0)/bin/claude" }
+            .sorted()
+            .map { ("\(nvmDir)/\($0)/bin/claude", "NVM \($0)") }
     }
 
     private static func shellPathLookup() -> String? {
@@ -450,13 +529,125 @@ final class ClaudeService: Sendable {
         log.info("[logout] Logout complete")
     }
 
+    // MARK: - Version
+
+    /// Run `<path> --version` and return the first semver-looking token.
+    /// Returns nil on launch failure, non-zero exit, or no version found.
+    static func readVersion(at path: String) async -> String? {
+        guard FileManager.default.isExecutableFile(atPath: path) else { return nil }
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                let stdout = Pipe()
+                process.executableURL = URL(fileURLWithPath: path)
+                process.arguments = ["--version"]
+                process.standardOutput = stdout
+                process.standardError = Pipe()
+
+                // Inject same PATH augmentation as runClaude so NVM-installed
+                // claude can find `node` when invoked here.
+                var env = ProcessInfo.processInfo.environment
+                let homeDir = NSHomeDirectory()
+                var extraPaths = [
+                    "/opt/homebrew/bin",
+                    "/usr/local/bin",
+                    "\(homeDir)/.local/bin",
+                    "\(homeDir)/.npm-global/bin"
+                ]
+                let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+                let resolvedBinDir = URL(fileURLWithPath: resolved).deletingLastPathComponent().path
+                extraPaths.insert(resolvedBinDir, at: 0)
+                let existingPath = env["PATH"] ?? "/usr/bin:/bin"
+                env["PATH"] = (extraPaths + [existingPath]).joined(separator: ":")
+                env["HOME"] = homeDir
+                process.environment = env
+
+                do {
+                    try process.run()
+                } catch {
+                    log.warning("[readVersion] launch failed for \(path): \(error.localizedDescription)")
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                let deadline = Date().addingTimeInterval(5.0)
+                while process.isRunning && Date() < deadline {
+                    Thread.sleep(forTimeInterval: 0.05)
+                }
+                if process.isRunning {
+                    process.terminate()
+                    log.warning("[readVersion] timed out for \(path)")
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                guard process.terminationStatus == 0 else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                let data = stdout.fileHandleForReading.readDataToEndOfFile()
+                let raw = String(data: data, encoding: .utf8) ?? ""
+                continuation.resume(returning: Self.extractSemver(from: raw))
+            }
+        }
+    }
+
+    /// Fetch the latest published claude-code version. Returns nil on any failure.
+    static func fetchLatestVersion() async -> String? {
+        guard let url = URL(string: "https://downloads.claude.ai/claude-code-releases/latest") else {
+            return nil
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5.0
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                log.warning("[fetchLatestVersion] non-200 response")
+                return nil
+            }
+            let raw = String(data: data, encoding: .utf8) ?? ""
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Strict: the entire body must BE a semver. Protects against the CDN
+            // returning an HTML error page with 200 status that happens to contain
+            // dotted numbers (CSS dimensions, version strings in copy, etc.).
+            return Self.isPureSemver(trimmed) ? trimmed : nil
+        } catch {
+            log.warning("[fetchLatestVersion] error: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    /// True if the whole string is ASCII digits separated by dots (e.g. "1.0.42", "2.1.139").
+    private static func isPureSemver(_ s: String) -> Bool {
+        guard !s.isEmpty, s.count <= 32 else { return false }
+        let parts = s.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count >= 2 else { return false }
+        for p in parts {
+            guard !p.isEmpty else { return false }
+            for ch in p {
+                guard ch.isASCII, ch.isNumber else { return false }
+            }
+        }
+        return true
+    }
+
+    /// Extract the first dotted-ASCII-numeric token from a string (e.g. "1.0.42" out of "1.0.42 (Claude Code)").
+    private static func extractSemver(from text: String) -> String? {
+        let allowed: (Character) -> Bool = { $0.isASCII && ($0.isNumber || $0 == ".") }
+        for token in text.split(whereSeparator: { !allowed($0) }) {
+            let s = String(token)
+            guard isPureSemver(s) else { continue }
+            return s
+        }
+        return nil
+    }
+
     // MARK: - CLI Runner
 
     private func runClaude(args: [String]) async throws -> String {
-        let claudePath = await pathTask.value
-        let env = await envTask.value
-        log.debug("[runClaude] Running: claude \(args.joined(separator: " "))")
-
+        let claudePath = self.claudePath
+        let env = Self.buildEnvironment(claudePath: claudePath)
+        log.debug("[runClaude] Running: \(claudePath) \(args.joined(separator: " "))")
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let process = Process()

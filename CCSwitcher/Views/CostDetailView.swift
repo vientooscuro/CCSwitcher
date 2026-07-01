@@ -4,8 +4,6 @@ import SwiftUI
 struct CostDetailView: View {
     @EnvironmentObject private var appState: AppState
 
-    private static let pricingURL = URL(string: "https://platform.claude.com/docs/en/about-claude/pricing")!
-
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
@@ -40,12 +38,10 @@ struct CostDetailView: View {
                 .monospacedDigit()
                 .foregroundStyle(.green)
 
-            if let today, !today.sortedBreakdown.isEmpty {
+            if let today, !today.modelBreakdown.isEmpty {
                 Divider()
                 VStack(spacing: 4) {
-                    ForEach(today.sortedBreakdown, id: \.model) { entry in
-                        let model = entry.model
-                        let cost = entry.cost
+                    ForEach(today.modelBreakdown.sorted(by: { $0.value > $1.value }), id: \.key) { model, cost in
                         HStack {
                             Text(model)
                                 .font(.caption2)
@@ -77,9 +73,11 @@ struct CostDetailView: View {
     private var periodSummaryCards: some View {
         let costs = appState.costSummary.dailyCosts
         let todayStr = todayString()
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
 
-        let last7 = costForLastDays(7, costs: costs, today: todayStr, formatter: Formatters.isoDay)
-        let last30 = costForLastDays(30, costs: costs, today: todayStr, formatter: Formatters.isoDay)
+        let last7 = costForLastDays(7, costs: costs, today: todayStr, formatter: formatter)
+        let last30 = costForLastDays(30, costs: costs, today: todayStr, formatter: formatter)
 
         return HStack(spacing: 10) {
             periodCard(title: "Last 7 Days", cost: last7)
@@ -88,7 +86,7 @@ struct CostDetailView: View {
         .padding(.horizontal, 16)
     }
 
-    private func periodCard(title: String, cost: Double) -> some View {
+    private func periodCard(title: LocalizedStringKey, cost: Double) -> some View {
         VStack(spacing: 4) {
             Text(title)
                 .font(.caption2)
@@ -196,103 +194,36 @@ struct CostDetailView: View {
             .padding(.horizontal, 16)
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("Cost is computed from Claude Code session logs (~/.claude/projects/), deduplicated by request ID.")
+                Text("Cost is computed from your local Claude Code session logs (jsonl files) under ~/.claude/projects/.")
                     .font(.caption2)
                     .foregroundStyle(.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
-                // Pricing table
-                VStack(spacing: 0) {
-                    pricingHeader
-                    Divider()
-                    ForEach(Self.pricingRows, id: \.model) { row in
-                        pricingRow(row)
-                        Divider()
+                if let v = VerifiedAgainst.load() {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.seal.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.green)
+                        Text("Verified against ccusage \(v.ccusageVersion) on \(v.verifiedOn) — \(v.windowDays)-day total matched to the cent.")
+                            .font(.caption2)
+                            .foregroundStyle(.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                .background(.cardFill)
-                .clipShape(RoundedRectangle(cornerRadius: AppStyle.cardCornerRadius))
-                .overlay(RoundedRectangle(cornerRadius: AppStyle.cardCornerRadius).strokeBorder(.cardBorder, lineWidth: 1))
-
-                Text("Cache write shown for 1-hour tier (2× input) — Claude Code's default. 5-min tier is 1.25× input. Cache read = 0.1× input.")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.textSecondary)
-
-                Button {
-                    NSWorkspace.shared.open(Self.pricingURL)
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "link")
-                            .font(.caption2)
-                        Text("Official Pricing — platform.claude.com")
-                            .font(.caption2)
-                    }
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.blue)
             }
             .cardStyle()
             .sectionPadding()
         }
     }
 
-    private var pricingHeader: some View {
-        HStack(spacing: 0) {
-            Text("Model")
-                .frame(width: 62, alignment: .leading)
-            Text("Input")
-                .frame(maxWidth: .infinity, alignment: .trailing)
-            Text("Output")
-                .frame(maxWidth: .infinity, alignment: .trailing)
-            Text("Cache 1h")
-                .frame(maxWidth: .infinity, alignment: .trailing)
-            Text("Cache R")
-                .frame(maxWidth: .infinity, alignment: .trailing)
-        }
-        .font(.system(size: 9, weight: .semibold))
-        .foregroundStyle(.textSecondary)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-    }
-
-    private struct PricingRowData {
-        let model: String
-        let input: String
-        let output: String
-        let cacheW: String
-        let cacheR: String
-    }
-
-    /// Static — never changes. The previous computed property allocated a
-    /// fresh array on every body invalidation.
-    private static let pricingRows: [PricingRowData] = [
-        PricingRowData(model: "Opus 4.7", input: "$5", output: "$25", cacheW: "$10", cacheR: "$0.50"),
-        PricingRowData(model: "Sonnet 4.6", input: "$3", output: "$15", cacheW: "$6", cacheR: "$0.30"),
-        PricingRowData(model: "Haiku 4.5", input: "$1", output: "$5", cacheW: "$2", cacheR: "$0.10"),
-    ]
-
-    private func pricingRow(_ row: PricingRowData) -> some View {
-        HStack(spacing: 0) {
-            Text(row.model)
-                .frame(width: 62, alignment: .leading)
-            Text(row.input)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-            Text(row.output)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-            Text(row.cacheW)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-            Text(row.cacheR)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-        }
-        .font(.system(size: 9).monospacedDigit())
-        .foregroundStyle(.textSecondary)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-    }
-
     // MARK: - Helpers
 
     private func formatCost(_ cost: Double) -> String {
-        Formatters.currency(cost)
+        if cost >= 1 {
+            return String(format: "$%.2f", cost)
+        } else {
+            return String(format: "$%.4f", cost)
+        }
     }
 
     private func formatTokenCount(_ count: Int) -> String {
@@ -305,11 +236,15 @@ struct CostDetailView: View {
     }
 
     private func todayString() -> String {
-        Formatters.isoDay.string(from: Date())
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: Date())
     }
 
     private func todayDisplayDate() -> String {
-        Formatters.monthDay.string(from: Date())
+        let f = DateFormatter()
+        f.dateFormat = "MMM d"
+        return f.string(from: Date())
     }
 
     private func shortDate(_ dateStr: String) -> String {
