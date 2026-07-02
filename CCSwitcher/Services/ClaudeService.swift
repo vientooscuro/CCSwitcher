@@ -54,6 +54,14 @@ final class ClaudeService: @unchecked Sendable {
         config.timeoutIntervalForRequest = 10
         config.timeoutIntervalForResource = 30
         config.waitsForConnectivity = false
+        // The usage endpoint (`/api/oauth/usage`) is the same URL for every
+        // account — only the Authorization header differs. URLCache keys on the
+        // URL and ignores that header, so a cached response for one account was
+        // being served to another (all accounts showed the active account's
+        // numbers). Disable caching entirely: these authed, per-user responses
+        // must never be reused across accounts.
+        config.urlCache = nil
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
         self.session = URLSession(configuration: config)
     }
 
