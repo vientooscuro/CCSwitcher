@@ -257,7 +257,7 @@ final class AppState: ObservableObject {
             log.info("[addAccount] Created account model, id=\(account.id)")
 
             log.info("[addAccount] Capturing token from keychain...")
-            let captured = await claudeService.captureCurrentCredentials(forAccountId: account.id.uuidString)
+            let captured = await claudeService.captureCurrentCredentials(forAccountId: account.id.uuidString, expectedEmail: account.email)
             if !captured {
                 errorMessage = String(localized: "Could not capture auth token from keychain", bundle: L10n.bundle)
                 log.error("[addAccount] Token capture failed!")
@@ -294,7 +294,7 @@ final class AppState: ObservableObject {
         do {
             if let current = activeAccount {
                 log.info("[loginNewAccount] Step 1: Backing up current account (\(current.email))...")
-                let backed = await claudeService.captureCurrentCredentials(forAccountId: current.id.uuidString)
+                let backed = await claudeService.captureCurrentCredentials(forAccountId: current.id.uuidString, expectedEmail: current.email)
                 log.info("[loginNewAccount] Step 1: Backup result: \(backed)")
             } else {
                 log.info("[loginNewAccount] Step 1: No active account, skipping backup")
@@ -316,7 +316,7 @@ final class AppState: ObservableObject {
 
             if let existing = accounts.firstIndex(where: { $0.email == email }) {
                 log.info("[loginNewAccount] Step 4: Account already exists, refreshing backup")
-                _ = await claudeService.captureCurrentCredentials(forAccountId: accounts[existing].id.uuidString)
+                _ = await claudeService.captureCurrentCredentials(forAccountId: accounts[existing].id.uuidString, expectedEmail: email)
                 errorMessage = String(localized: "Account already exists - credentials refreshed", bundle: L10n.bundle)
                 isLoggingIn = false
                 return
@@ -332,7 +332,7 @@ final class AppState: ObservableObject {
             )
             log.info("[loginNewAccount] Step 5: Created account, id=\(account.id)")
 
-            let captured = await claudeService.captureCurrentCredentials(forAccountId: account.id.uuidString)
+            let captured = await claudeService.captureCurrentCredentials(forAccountId: account.id.uuidString, expectedEmail: account.email)
             if !captured {
                 errorMessage = String(localized: "Could not capture credentials", bundle: L10n.bundle)
                 log.error("[loginNewAccount] Step 5: Capture failed!")
@@ -441,7 +441,7 @@ final class AppState: ObservableObject {
         do {
             if let current = activeAccount, current.id != account.id {
                 log.info("[reauth] Backing up current account before login...")
-                _ = await claudeService.captureCurrentCredentials(forAccountId: current.id.uuidString)
+                _ = await claudeService.captureCurrentCredentials(forAccountId: current.id.uuidString, expectedEmail: current.email)
             }
 
             log.info("[reauth] Running `claude auth login`...")
@@ -461,7 +461,7 @@ final class AppState: ObservableObject {
                 return
             }
 
-            let captured = await claudeService.captureCurrentCredentials(forAccountId: account.id.uuidString)
+            let captured = await claudeService.captureCurrentCredentials(forAccountId: account.id.uuidString, expectedEmail: account.email)
             log.info("[reauth] Token capture result: \(captured)")
 
             if let index = accounts.firstIndex(where: { $0.id == account.id }) {
@@ -910,7 +910,7 @@ final class AppState: ObservableObject {
             )
             accounts.append(account)
             activeAccount = account
-            _ = await claudeService.captureCurrentCredentials(forAccountId: account.id.uuidString)
+            _ = await claudeService.captureCurrentCredentials(forAccountId: account.id.uuidString, expectedEmail: account.email)
             scheduleSave()
             log.info("[updateActiveAccount] Auto-created first account, id=\(account.id)")
         } else {

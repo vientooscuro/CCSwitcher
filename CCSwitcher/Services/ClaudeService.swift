@@ -461,12 +461,16 @@ final class ClaudeService: @unchecked Sendable {
 
         log.info("[switchAccount] Switching from \(currentAccount.id) to \(targetAccount.id)")
 
+        // Read the source live credentials once: used to refresh the source
+        // backup (Step 1) and to roll back Step 3 if it half-completes.
+        let sourceToken = await keychain.readClaudeToken()
+        let sourceOAuth = await keychain.readOAuthAccount()
+
         log.info("[switchAccount] Step 1: Backing up current account...")
-        if let currentToken = await keychain.readClaudeToken(),
-           let currentOAuth = await keychain.readOAuthAccount() {
-            let email = (currentOAuth["emailAddress"]?.value as? String) ?? "?"
+        if let sourceToken, let sourceOAuth {
+            let email = (sourceOAuth["emailAddress"]?.value as? String) ?? "?"
             if email == currentAccount.email {
-                let saved = await keychain.saveAccountBackup(token: currentToken, oauthAccount: currentOAuth, forAccountId: currentAccount.id.uuidString)
+                let saved = await keychain.saveAccountBackup(token: sourceToken, oauthAccount: sourceOAuth, forAccountId: currentAccount.id.uuidString)
                 log.info("[switchAccount] Step 1: Backup saved: \(saved)")
             } else {
                 log.warning("[switchAccount] Step 1: oauthAccount email (\(email)) != source (\(currentAccount.email)), skipping backup")
@@ -483,14 +487,20 @@ final class ClaudeService: @unchecked Sendable {
         let targetEmail = (targetBackup.oauthAccount["emailAddress"]?.value as? String) ?? "?"
         log.info("[switchAccount] Step 2: Target backup found (email=\(targetEmail))")
 
+        // Write both target values. A half-written switch (new token but old
+        // oauthAccount, or vice-versa) leaves the keychain desynced, and the
+        // next switch would then back up the wrong account's token. Write
+        // oauthAccount first, token second, and undo the first if the second
+        // fails so we never persist a mismatched token/oauthAccount pair.
         log.info("[switchAccount] Step 3: Writing target credentials...")
-        guard await keychain.writeClaudeToken(targetBackup.token) else {
-            log.error("[switchAccount] Step 3: Failed to write token to keychain!")
-            throw ClaudeServiceError.keychainWriteFailed
-        }
         guard await keychain.writeOAuthAccount(targetBackup.oauthAccount) else {
             log.error("[switchAccount] Step 3: Failed to write oauthAccount to ~/.claude.json!")
             throw ClaudeServiceError.oauthAccountWriteFailed
+        }
+        guard await keychain.writeClaudeToken(targetBackup.token) else {
+            log.error("[switchAccount] Step 3: Failed to write token; rolling back oauthAccount to keep source consistent")
+            if let sourceOAuth { _ = await keychain.writeOAuthAccount(sourceOAuth) }
+            throw ClaudeServiceError.keychainWriteFailed
         }
         log.info("[switchAccount] Step 3: Both token and oauthAccount written")
 
@@ -508,9 +518,14 @@ final class ClaudeService: @unchecked Sendable {
         return status
     }
 
-    /// Capture the current Claude auth token + oauthAccount and associate with an account
-    func captureCurrentCredentials(forAccountId accountId: String) async -> Bool {
-        log.info("[capture] Capturing credentials for account \(accountId)...")
+    /// Capture the current Claude auth token + oauthAccount and associate with an account.
+    ///
+    /// `expectedEmail` is the account we believe is currently active. The live
+    /// `oauthAccount` must match it or we refuse to save — otherwise a moment of
+    /// desynced app/CLI state can write account A's credentials into account B's
+    /// backup slot (the bug that made two accounts report identical usage).
+    func captureCurrentCredentials(forAccountId accountId: String, expectedEmail: String) async -> Bool {
+        log.info("[capture] Capturing credentials for account \(accountId) (expect \(expectedEmail))...")
         let keychain = KeychainService.shared
         guard let token = await keychain.readClaudeToken() else {
             log.error("[capture] Failed: no token found in keychain")
@@ -521,6 +536,10 @@ final class ClaudeService: @unchecked Sendable {
             return false
         }
         let email = (oauthAccount["emailAddress"]?.value as? String) ?? "?"
+        guard email == expectedEmail else {
+            log.warning("[capture] Identity mismatch: live account is \(email) but expected \(expectedEmail); refusing to save backup")
+            return false
+        }
         log.info("[capture] Token + oauthAccount found (email=\(email)), saving backup...")
         let result = await keychain.saveAccountBackup(token: token, oauthAccount: oauthAccount, forAccountId: accountId)
         log.info("[capture] Save result: \(result)")
