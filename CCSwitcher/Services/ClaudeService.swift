@@ -469,11 +469,16 @@ final class ClaudeService: @unchecked Sendable {
         log.info("[switchAccount] Step 1: Backing up current account...")
         if let sourceToken, let sourceOAuth {
             let email = (sourceOAuth["emailAddress"]?.value as? String) ?? "?"
-            if email == currentAccount.email {
+            // Require BOTH the oauthAccount email and an authoritative `auth
+            // status` identity to agree the live token is the source account.
+            // The source is still live at this step, so `auth status` reflects
+            // its token — this blocks a token↔oauthAccount desync from stashing
+            // a foreign token under the source's backup slot.
+            if email == currentAccount.email, await liveTokenIdentityMatches(currentAccount.email) {
                 let saved = await keychain.saveAccountBackup(token: sourceToken, oauthAccount: sourceOAuth, forAccountId: currentAccount.id.uuidString)
                 log.info("[switchAccount] Step 1: Backup saved: \(saved)")
             } else {
-                log.warning("[switchAccount] Step 1: oauthAccount email (\(email)) != source (\(currentAccount.email)), skipping backup")
+                log.warning("[switchAccount] Step 1: identity check failed (oauthAccount=\(email), source=\(currentAccount.email)); skipping backup")
             }
         } else {
             log.warning("[switchAccount] Step 1: Could not read current token or oauthAccount")
@@ -518,15 +523,54 @@ final class ClaudeService: @unchecked Sendable {
         return status
     }
 
+    /// Authoritatively confirm the identity of the *live* Claude token by
+    /// asking the CLI (`claude auth status`). The token blob itself carries no
+    /// email, and `~/.claude.json`'s `oauthAccount` lives in a *different* store
+    /// than the keychain token — the two can desync (e.g. the real Claude Code
+    /// switches accounts out from under us), so trusting `oauthAccount.email`
+    /// alone can pair a foreign token with an account's backup slot. This check
+    /// reflects the identity the server actually attributes to the live token.
+    /// Returns false (refuses to vouch) on any mismatch or error.
+    private func liveTokenIdentityMatches(_ expectedEmail: String) async -> Bool {
+        do {
+            let status = try await getAuthStatus()
+            guard status.loggedIn, let email = status.email else {
+                log.warning("[identity] `auth status` reports not-logged-in; not trusting live token as \(expectedEmail)")
+                return false
+            }
+            guard email == expectedEmail else {
+                log.error("[identity] live token belongs to \(email), not \(expectedEmail) — refusing to use it")
+                return false
+            }
+            return true
+        } catch {
+            log.warning("[identity] `auth status` failed (\(error.localizedDescription)); not trusting live token as \(expectedEmail)")
+            return false
+        }
+    }
+
     /// Capture the current Claude auth token + oauthAccount and associate with an account.
     ///
-    /// `expectedEmail` is the account we believe is currently active. The live
-    /// `oauthAccount` must match it or we refuse to save — otherwise a moment of
-    /// desynced app/CLI state can write account A's credentials into account B's
-    /// backup slot (the bug that made two accounts report identical usage).
+    /// `expectedEmail` is the account we believe is currently active. Before
+    /// saving we require BOTH the live `oauthAccount` email AND an authoritative
+    /// `claude auth status` identity to equal `expectedEmail` — otherwise a
+    /// moment of desynced app/CLI state can write account A's credentials into
+    /// account B's backup slot (the bug that made a personal-Max account report
+    /// a team subscription and team limits).
     func captureCurrentCredentials(forAccountId accountId: String, expectedEmail: String) async -> Bool {
         log.info("[capture] Capturing credentials for account \(accountId) (expect \(expectedEmail))...")
         let keychain = KeychainService.shared
+
+        // Authoritative identity gate: confirm the live token really belongs to
+        // `expectedEmail` via the server before we stash it. Checking only the
+        // `~/.claude.json` oauthAccount email (below) is not enough — that file
+        // and the keychain token can desync, which is how a team token once got
+        // saved under a personal-Max account's backup slot.
+        guard await liveTokenIdentityMatches(expectedEmail) else {
+            log.error("[capture] Live identity check failed for \(expectedEmail); refusing to save backup")
+            return false
+        }
+
         guard let token = await keychain.readClaudeToken() else {
             log.error("[capture] Failed: no token found in keychain")
             return false
