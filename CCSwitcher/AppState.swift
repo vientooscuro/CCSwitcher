@@ -606,15 +606,19 @@ final class AppState: ObservableObject {
                 if let usageError = error as? ClaudeService.UsageError {
                     switch usageError {
                     case .expired:
-                        log.warning("[fetchUsage] Token expired for \(r.email), attempting OAuth refresh")
-                        if await refreshAndRetryUsage(accountId: r.accountId, isActive: r.isActive, email: r.email) {
-                            continue
-                        }
-                        // Direct refresh failed. For active accounts, fall back to
-                        // the delegated `claude auth status` path which uses the
-                        // CLI's own refresh logic (handles cases our direct grant
-                        // doesn't, e.g. transient network).
                         if r.isActive {
+                            // ACTIVE account: never issue our own OAuth
+                            // refresh-token grant. The live keychain credential
+                            // holds a *rotating* refresh token that the real
+                            // `claude` CLI / Claude Code also refreshes. Two
+                            // independent refreshers inevitably desync, and when
+                            // the stale copy is presented the server's
+                            // refresh-token reuse detection revokes the entire
+                            // token family — a persistent invalid_grant that
+                            // only a manual `claude` re-auth clears (the 1-2 day
+                            // "refresh failed" loop). Delegate to the CLI so
+                            // there is exactly one writer of the live token.
+                            log.warning("[fetchUsage] Token expired for \(r.email), delegating refresh to CLI")
                             do {
                                 _ = try await claudeService.getAuthStatus()
                                 if let refreshedJSON = await keychain.readClaudeToken(),
@@ -622,18 +626,29 @@ final class AppState: ObservableObject {
                                    let usage = try? await claudeService.getUsageLimits(accessToken: refreshedToken) {
                                     accountUsage[r.accountId] = usage
                                     accountUsageErrors[r.accountId] = nil
-                                    log.info("[fetchUsage] Recovered \(r.email) via delegated refresh.")
+                                    log.info("[fetchUsage] Recovered \(r.email) via delegated CLI refresh.")
                                     continue
                                 }
                             } catch {
                                 log.error("[fetchUsage] Delegated refresh failed: \(error.localizedDescription)")
                             }
-                        }
-                        // Don't clobber the specific invalid_grant message that
-                        // `performRefreshAndRetry` already wrote.
-                        if !accountRefreshTokenInvalid.contains(r.accountId) {
                             accountUsage[r.accountId] = nil
                             accountUsageErrors[r.accountId] = UsageErrorState(isExpired: true, isRateLimited: false, message: String(localized: "Session expired. Please re-authenticate this account in Claude Code.", bundle: L10n.bundle))
+                        } else {
+                            // INACTIVE backup account: CCSwitcher is the sole
+                            // owner of this keychain entry, so no external
+                            // client races our refresh — a direct OAuth grant is
+                            // safe here.
+                            log.warning("[fetchUsage] Token expired for \(r.email), attempting OAuth refresh")
+                            if await refreshAndRetryUsage(accountId: r.accountId, isActive: false, email: r.email) {
+                                continue
+                            }
+                            // Don't clobber the specific invalid_grant message that
+                            // `performRefreshAndRetry` already wrote.
+                            if !accountRefreshTokenInvalid.contains(r.accountId) {
+                                accountUsage[r.accountId] = nil
+                                accountUsageErrors[r.accountId] = UsageErrorState(isExpired: true, isRateLimited: false, message: String(localized: "Session expired. Please re-authenticate this account in Claude Code.", bundle: L10n.bundle))
+                            }
                         }
 
                     case .rateLimited(let retryAfter):
@@ -658,10 +673,15 @@ final class AppState: ObservableObject {
     }
 
     /// Try to refresh an expired OAuth token in-place (no account switch
-    /// required) and retry the usage call. Works for both the active account
-    /// (writes through `KeychainService.writeClaudeToken`) and inactive
-    /// accounts (writes through `saveAccountBackup`). Returns true on full
-    /// recovery — `accountUsage` / `accountUsageErrors` have been updated.
+    /// required) and retry the usage call. Returns true on full recovery —
+    /// `accountUsage` / `accountUsageErrors` have been updated.
+    ///
+    /// Only called for INACTIVE backup accounts (`isActive: false`, writes
+    /// through `saveAccountBackup`). The active account must NOT use this path:
+    /// its live refresh token rotates and is shared with the real `claude` CLI,
+    /// so issuing our own grant trips the server's reuse detection and revokes
+    /// the whole token family. The active account delegates to the CLI instead
+    /// (see the `.expired` handling in `fetchUsage`).
     ///
     /// Per-account dedup: if a refresh is already running for `accountId`,
     /// the caller awaits the existing task instead of starting a parallel
