@@ -262,6 +262,12 @@ struct UsageDashboardView: View {
         if let weekly = usage.sevenDay {
             usageRow(label: "Weekly", resetText: weekly.resetTimeString, utilization: weekly.utilization ?? 0)
         }
+        // Model-scoped limits (e.g. a separate Fable 5 weekly limit) — only
+        // present when the subscription actually carries them.
+        ForEach(usage.scopedModelLimits) { limit in
+            usageRow(labelText: limit.modelName, dotColor: modelColor(limit.modelName),
+                     resetText: limit.resetTime, utilization: limit.utilization)
+        }
     }
 
     @ViewBuilder
@@ -288,9 +294,23 @@ struct UsageDashboardView: View {
     // MARK: - Usage Row
 
     private func usageRow(label: LocalizedStringKey, resetText: String?, utilization: Double) -> some View {
+        usageRow(labelView: Text(label), dotColor: nil, resetText: resetText, utilization: utilization)
+    }
+
+    /// Verbatim-label variant for dynamic, non-localizable labels (model names).
+    private func usageRow(labelText: String, dotColor: Color?, resetText: String?, utilization: Double) -> some View {
+        usageRow(labelView: Text(labelText), dotColor: dotColor, resetText: resetText, utilization: utilization)
+    }
+
+    private func usageRow(labelView: Text, dotColor: Color?, resetText: String?, utilization: Double) -> some View {
         VStack(spacing: 5) {
             HStack {
-                Text(label)
+                if let dotColor {
+                    Circle()
+                        .fill(dotColor)
+                        .frame(width: 7, height: 7)
+                }
+                labelView
                     .font(.caption)
                     .foregroundStyle(.textSecondary)
                 Spacer()

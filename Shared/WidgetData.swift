@@ -4,6 +4,14 @@ import Foundation
 ///
 /// The main app (non-sandboxed) writes a JSON file into the widget extension's container directory.
 /// The widget (sandboxed) reads from its own Application Support, which maps to the same path.
+/// A model-scoped rate-limit (e.g. a separate Fable 5 weekly limit), flattened
+/// for the widget. Only populated when the subscription carries such a limit.
+struct WidgetScopedLimit: Codable, Hashable {
+    let modelName: String
+    let utilization: Double
+    let resetTime: String?
+}
+
 struct WidgetAccountData: Codable {
     let email: String          // pre-obfuscated
     let displayName: String    // pre-obfuscated
@@ -16,6 +24,8 @@ struct WidgetAccountData: Codable {
     let extraUsageEnabled: Bool?
     let hasError: Bool
     let errorMessage: String?
+    // Optional for backward-compatible decode of older widget-data.json files.
+    let scopedLimits: [WidgetScopedLimit]?
 }
 
 struct WidgetData: Codable {

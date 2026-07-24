@@ -842,7 +842,10 @@ final class AppState: ObservableObject {
                 weeklyResetTime: usage?.sevenDay?.resetTimeString,
                 extraUsageEnabled: usage?.extraUsage?.isEnabled,
                 hasError: error != nil,
-                errorMessage: error?.message
+                errorMessage: error?.message,
+                scopedLimits: (usage?.scopedModelLimits ?? []).map {
+                    WidgetScopedLimit(modelName: $0.modelName, utilization: $0.utilization, resetTime: $0.resetTime)
+                }
             )
         }
 
@@ -868,6 +871,11 @@ final class AppState: ObservableObject {
             hasher.combine(w.extraUsageEnabled ?? false)
             hasher.combine(w.hasError)
             hasher.combine(w.errorMessage ?? "")
+            for s in w.scopedLimits ?? [] {
+                hasher.combine(s.modelName)
+                hasher.combine(Int(s.utilization))
+                hasher.combine(s.resetTime ?? "")
+            }
         }
         let hash = hasher.finalize()
 

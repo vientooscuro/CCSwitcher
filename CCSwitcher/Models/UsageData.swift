@@ -11,6 +11,11 @@ struct UsageAPIResponse: Codable {
     let sevenDayCowork: UsageWindow?
     let iguanaNecktie: UsageWindow?
     let extraUsage: ExtraUsage?
+    /// Structured, forward-compatible list of every rate-limit the account has.
+    /// Supersedes the legacy per-model `seven_day_*` fields (now always null).
+    /// Carries model-scoped limits — e.g. a separate Fable 5 weekly limit —
+    /// that only appear when the subscription actually includes them.
+    let limits: [UsageLimit]?
 
     enum CodingKeys: String, CodingKey {
         case fiveHour = "five_hour"
@@ -21,6 +26,68 @@ struct UsageAPIResponse: Codable {
         case sevenDayCowork = "seven_day_cowork"
         case iguanaNecktie = "iguana_necktie"
         case extraUsage = "extra_usage"
+        case limits
+    }
+}
+
+// MARK: - Structured Limits (`limits` array)
+
+/// One entry from the `limits` array of `/api/oauth/usage`.
+/// `kind` is `"session"`, `"weekly_all"`, or `"weekly_scoped"`; a
+/// `weekly_scoped` entry carries a `scope.model` naming the model it limits.
+struct UsageLimit: Codable {
+    let kind: String?
+    let group: String?
+    let percent: Double?
+    let severity: String?
+    let resetsAt: String?
+    let scope: UsageLimitScope?
+    let isActive: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case kind, group, percent, severity, scope
+        case resetsAt = "resets_at"
+        case isActive = "is_active"
+    }
+}
+
+struct UsageLimitScope: Codable {
+    let model: UsageLimitModel?
+}
+
+struct UsageLimitModel: Codable {
+    let id: String?
+    let displayName: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case displayName = "display_name"
+    }
+}
+
+extension UsageAPIResponse {
+    /// A model-scoped rate-limit distilled for display (e.g. Fable 5's own
+    /// weekly limit). Present only when the subscription carries such a limit.
+    struct ScopedModelLimit: Identifiable {
+        let modelName: String
+        let utilization: Double
+        let resetTime: String?
+        var id: String { modelName }
+    }
+
+    /// Every per-model weekly limit the account has, in API order.
+    /// Generic: any model that gets its own scoped limit shows up here.
+    var scopedModelLimits: [ScopedModelLimit] {
+        (limits ?? []).compactMap { limit in
+            guard limit.kind == "weekly_scoped",
+                  let name = limit.scope?.model?.displayName else { return nil }
+            let window = UsageWindow(utilization: limit.percent, resetsAt: limit.resetsAt)
+            return ScopedModelLimit(
+                modelName: name,
+                utilization: limit.percent ?? 0,
+                resetTime: window.resetTimeString
+            )
+        }
     }
 }
 

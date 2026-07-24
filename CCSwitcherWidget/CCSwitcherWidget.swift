@@ -26,7 +26,8 @@ struct CCSwitcherEntry: TimelineEntry {
                     weeklyResetTime: "in 3 days",
                     extraUsageEnabled: true,
                     hasError: false,
-                    errorMessage: nil
+                    errorMessage: nil,
+                    scopedLimits: [WidgetScopedLimit(modelName: "Fable", utilization: 46, resetTime: "in 4 days")]
                 )
             ],
             todayCost: 3.45,
@@ -165,6 +166,9 @@ private struct SmallWidgetView: View {
                 } else {
                     compactUsageBar(label: "Session", utilization: account.sessionUtilization)
                     compactUsageBar(label: "Weekly", utilization: account.weeklyUtilization)
+                    ForEach(account.scopedLimits ?? [], id: \.modelName) { limit in
+                        compactUsageBar(labelText: limit.modelName, utilization: limit.utilization)
+                    }
                 }
 
                 Spacer(minLength: 2)
@@ -190,10 +194,18 @@ private struct SmallWidgetView: View {
     }
 
     private func compactUsageBar(label: LocalizedStringKey, utilization: Double?) -> some View {
+        compactUsageBar(labelView: Text(label), utilization: utilization)
+    }
+
+    private func compactUsageBar(labelText: String, utilization: Double?) -> some View {
+        compactUsageBar(labelView: Text(labelText), utilization: utilization)
+    }
+
+    private func compactUsageBar(labelView: Text, utilization: Double?) -> some View {
         let pct = utilization ?? 0
         return VStack(spacing: 3) {
             HStack {
-                Text(label)
+                labelView
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -283,6 +295,11 @@ private struct MediumWidgetView: View {
                             Spacer(minLength: 4)
                             usageBar(label: "Weekly", utilization: account.weeklyUtilization, resetTime: account.weeklyResetTime)
 
+                            ForEach(account.scopedLimits ?? [], id: \.modelName) { limit in
+                                Spacer(minLength: 4)
+                                usageBar(labelText: limit.modelName, utilization: limit.utilization, resetTime: limit.resetTime)
+                            }
+
                             if let extra = account.extraUsageEnabled {
                                 Spacer(minLength: 4)
                                 HStack(spacing: 4) {
@@ -326,10 +343,18 @@ private struct MediumWidgetView: View {
     }
 
     private func usageBar(label: LocalizedStringKey, utilization: Double?, resetTime: String?) -> some View {
+        usageBar(labelView: Text(label), utilization: utilization, resetTime: resetTime)
+    }
+
+    private func usageBar(labelText: String, utilization: Double?, resetTime: String?) -> some View {
+        usageBar(labelView: Text(labelText), utilization: utilization, resetTime: resetTime)
+    }
+
+    private func usageBar(labelView: Text, utilization: Double?, resetTime: String?) -> some View {
         let pct = utilization ?? 0
         return VStack(spacing: 3) {
             HStack {
-                Text(label)
+                labelView
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -511,6 +536,9 @@ private struct LargeWidgetView: View {
             } else {
                 accountUsageBar(label: "Session", utilization: account.sessionUtilization, resetTime: account.sessionResetTime)
                 accountUsageBar(label: "Weekly", utilization: account.weeklyUtilization, resetTime: account.weeklyResetTime)
+                ForEach(account.scopedLimits ?? [], id: \.modelName) { limit in
+                    accountUsageBar(labelText: limit.modelName, utilization: limit.utilization, resetTime: limit.resetTime)
+                }
             }
         }
         .padding(.horizontal, 12)
@@ -523,9 +551,17 @@ private struct LargeWidgetView: View {
     }
 
     private func accountUsageBar(label: LocalizedStringKey, utilization: Double?, resetTime: String?) -> some View {
+        accountUsageBar(labelView: Text(label), utilization: utilization, resetTime: resetTime)
+    }
+
+    private func accountUsageBar(labelText: String, utilization: Double?, resetTime: String?) -> some View {
+        accountUsageBar(labelView: Text(labelText), utilization: utilization, resetTime: resetTime)
+    }
+
+    private func accountUsageBar(labelView: Text, utilization: Double?, resetTime: String?) -> some View {
         let pct = utilization ?? 0
         return HStack(spacing: 6) {
-            Text(label)
+            labelView
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .frame(width: 48, alignment: .leading)
@@ -595,6 +631,14 @@ private struct CircleWidgetView: View {
                         utilization: account.weeklyUtilization,
                         accent: colorForUtilization(account.weeklyUtilization ?? 0)
                     )
+                    ForEach(account.scopedLimits ?? [], id: \.modelName) { limit in
+                        ringStat(
+                            labelText: limit.modelName,
+                            resetTime: limit.resetTime,
+                            utilization: limit.utilization,
+                            accent: colorForUtilization(limit.utilization)
+                        )
+                    }
                 }
                 .frame(maxWidth: .infinity)
             } else if let account = activeAccount, account.hasError {
@@ -627,6 +671,14 @@ private struct CircleWidgetView: View {
     }
 
     private func ringStat(label: LocalizedStringKey, resetTime: String?, utilization: Double?, accent: Color) -> some View {
+        ringStat(labelView: Text(label), resetTime: resetTime, utilization: utilization, accent: accent)
+    }
+
+    private func ringStat(labelText: String, resetTime: String?, utilization: Double?, accent: Color) -> some View {
+        ringStat(labelView: Text(labelText), resetTime: resetTime, utilization: utilization, accent: accent)
+    }
+
+    private func ringStat(labelView: Text, resetTime: String?, utilization: Double?, accent: Color) -> some View {
         let pct = utilization ?? 0
         return VStack(spacing: 4) {
             ZStack {
@@ -641,7 +693,7 @@ private struct CircleWidgetView: View {
             }
             .aspectRatio(1, contentMode: .fit)
 
-            Text(label)
+            labelView
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             if let reset = resetTime {
