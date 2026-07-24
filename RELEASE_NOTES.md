@@ -1,29 +1,25 @@
-### Reliability fixes for account tokens & usage
+### Per-model limits: Fable 5 shown separately
 
-- **Fixed the recurring "Session expired and refresh failed" loop.** CCSwitcher no longer runs its own OAuth refresh for the *active* account. That refresh competed with Claude Code refreshing the same rotating token, which tripped the server's refresh-token reuse detection and revoked the whole login every day or two. Token refresh for the active account is now delegated to the Claude CLI, so your signed-in account stays signed in.
-- **Fixed accounts showing the wrong plan and limits** (for example, a personal Max account displaying a Team subscription and Team limits). Before saving an account's backup, CCSwitcher now confirms the live token's real identity via the Claude CLI, so one account's token can never be stashed under another account's slot.
-- Additional hardening from this cycle: usage polling backs off correctly on repeated 429s from dead tokens, per-account usage responses are never cached (each account shows its own numbers), and account backups are guarded against identity mismatches.
+- **Subscriptions can now carry a separate weekly limit for Fable 5**, and CCSwitcher shows it wherever the other limits live. When your plan has a model-scoped limit, a dedicated bar (Usage Dashboard) or ring (widget) appears next to Session and Weekly, with its own percentage and reset time. It only shows up when your subscription actually has such a limit, so nothing changes if it doesn't.
+- The reading is generic: if Anthropic later scopes limits to other models too, they'll appear automatically — no update needed.
+- CCSwitcher now reads limits from the newer structured `limits` feed of the usage API, which is more forward-compatible than the older per-model fields.
 
-**Full Changelog**: https://github.com/vientooscuro/CCSwitcher/commits/v1.11.4
+#### Also in this release
 
-#### Included from v1.11.0
+- **Hardened account credentials against a token/identity desync** that could momentarily attach one account's token to another account's slot. Backups are now guarded so an account can never be saved under the wrong identity.
 
-- **Sonnet 5, Fable 5 and Opus 4.8** are now recognized in cost tracking, with correct per-token pricing (offline-ready from the bundled LiteLLM snapshot, revalidated over the network each cycle).
-- Merged upstream v1.10.0: cost math re-derived to match ccusage 20.0.9, live LiteLLM pricing with ETag revalidation, Fable shown in the cost breakdown, configurable iStats-style menu-bar modules, and a Claude CLI binary picker in Settings.
-- Fork extras kept: silent OAuth token refresh (no account switch), per-account 429 back-off, and a faster lock on Claude path resolution.
+**Full Changelog**: https://github.com/vientooscuro/CCSwitcher/compare/v1.11.4...v1.12.0
 
 ---
 
-### 账号令牌与用量的可靠性修复
+### 按模型的额度：单独显示 Fable 5
 
-- **修复了反复出现的 "Session expired and refresh failed" 循环。** CCSwitcher 不再为*当前*账号自行执行 OAuth 刷新。该刷新会与 Claude Code 刷新同一个轮换令牌相互冲突，触发服务器的刷新令牌重用检测，导致整个登录每隔一两天就被吊销。现在当前账号的令牌刷新交由 Claude CLI 处理，让已登录的账号保持登录状态。
-- **修复了账号显示错误的套餐与额度**（例如个人 Max 账号被显示为 Team 订阅和 Team 额度）。在保存账号备份前，CCSwitcher 现在会通过 Claude CLI 确认当前令牌的真实身份，因此一个账号的令牌绝不会被存到另一个账号的槽位里。
-- 本轮的其他加固：对失效令牌反复返回的 429 正确退避、按账号的用量响应绝不缓存（每个账号显示各自的数字），以及对身份不匹配的账号备份进行防护。
+- **订阅现在可以包含针对 Fable 5 的单独周额度**，CCSwitcher 会在其他额度所在的位置一并显示它。当你的套餐带有按模型划分的额度时，会在 Session 与 Weekly 旁边出现一条专属进度条（用量面板）或圆环（小组件），并带有各自的百分比与重置时间。只有当你的订阅确实存在该额度时才会显示，否则界面保持不变。
+- 读取方式是通用的：如果 Anthropic 之后也为其他模型划分额度，它们会自动出现，无需更新。
+- CCSwitcher 现在从用量 API 更新的结构化 `limits` 数据读取额度，比旧的按模型字段更具前向兼容性。
 
-**Full Changelog**: https://github.com/vientooscuro/CCSwitcher/commits/v1.11.4
+#### 本次发布还包含
 
-#### 包含 v1.11.0 的更新
+- **加固了账号凭证，防止令牌/身份错位**——此前可能会短暂地把一个账号的令牌挂到另一个账号的槽位上。现在备份已加防护，账号绝不会被保存到错误的身份之下。
 
-- 成本统计现已识别 **Sonnet 5、Fable 5 和 Opus 4.8**，并采用正确的按 token 计价（内置 LiteLLM 快照支持离线，且每个周期通过网络重新校验）。
-- 合并上游 v1.10.0：成本计算重新对齐 ccusage 20.0.9、带 ETag 重校验的实时 LiteLLM 计价、成本明细中显示 Fable、可配置的 iStats 风格菜单栏模块，以及设置中的 Claude CLI 可执行文件选择器。
-- 保留分支特性：静默刷新 OAuth 令牌（无需切换账号）、按账号的 429 退避，以及更快的 Claude 路径解析锁。
+**Full Changelog**: https://github.com/vientooscuro/CCSwitcher/compare/v1.11.4...v1.12.0
