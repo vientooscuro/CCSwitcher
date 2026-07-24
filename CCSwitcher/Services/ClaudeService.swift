@@ -320,6 +320,9 @@ final class ClaudeService: @unchecked Sendable {
             let refreshToken: String?
             // Stored as integer milliseconds since epoch in the keychain blob.
             let expiresAt: Double?
+            // Plan carried inside the keychain token blob ("max" / "team").
+            // Used to detect a token↔oauthAccount desync (see CredentialIdentity).
+            let subscriptionType: String?
         }
         let claudeAiOauth: OAuth
     }
@@ -329,6 +332,7 @@ final class ClaudeService: @unchecked Sendable {
         let accessToken: String
         let refreshToken: String?
         let expiresAt: Date?
+        let subscriptionType: String?
     }
 
     static func extractAccessToken(from tokenJSON: String) -> String? {
@@ -340,7 +344,69 @@ final class ClaudeService: @unchecked Sendable {
               let env = try? JSONDecoder().decode(TokenEnvelope.self, from: data) else { return nil }
         let oauth = env.claudeAiOauth
         let exp = oauth.expiresAt.map { Date(timeIntervalSince1970: $0 / 1000) }
-        return TokenCredentials(accessToken: oauth.accessToken, refreshToken: oauth.refreshToken, expiresAt: exp)
+        return TokenCredentials(accessToken: oauth.accessToken, refreshToken: oauth.refreshToken, expiresAt: exp, subscriptionType: oauth.subscriptionType)
+    }
+
+    // MARK: - Credential Identity (token↔oauthAccount desync detection)
+
+    /// A stable fingerprint of a live-or-backup credential pair, used to detect
+    /// when the keychain token and `~/.claude.json` oauthAccount have desynced
+    /// onto different accounts.
+    ///
+    /// The keychain token (plan) and the oauthAccount file (account/org uuids)
+    /// live in separate stores and are written independently — the real `claude`
+    /// CLI can (and does) swap one without the other, leaving e.g. account A's
+    /// oauthAccount paired with account B's team token. The prior guards trusted
+    /// `oauthAccount.email` / `claude auth status`, but that email is read from
+    /// the very file that desynced, so it can't see the mismatch. Comparing the
+    /// token-blob `subscriptionType` against the oauthAccount identity — and both
+    /// against the account's known-good backup — is what actually catches it.
+    struct CredentialIdentity: Equatable, Sendable {
+        let subscriptionType: String?   // from the keychain token blob
+        let accountUuid: String?        // from ~/.claude.json oauthAccount
+        let organizationUuid: String?   // from ~/.claude.json oauthAccount
+        let email: String?              // from ~/.claude.json oauthAccount
+
+        /// True only when every field the two identities *both* carry agrees.
+        /// A differing plan (team vs max), account uuid, or org uuid means the
+        /// live token↔oauthAccount pair no longer describes one account and must
+        /// not be trusted or persisted. Missing fields are treated as unknown
+        /// (not a conflict) so a partially-populated blob can't force a refusal.
+        func describesSameAccount(as other: CredentialIdentity) -> Bool {
+            if let a = accountUuid, let b = other.accountUuid, a != b { return false }
+            if let a = organizationUuid, let b = other.organizationUuid, a != b { return false }
+            if let a = subscriptionType, let b = other.subscriptionType, a != b { return false }
+            return true
+        }
+    }
+
+    /// Build a `CredentialIdentity` from a keychain token JSON + an oauthAccount.
+    static func credentialIdentity(tokenJSON: String, oauthAccount: [String: AnyCodable]) -> CredentialIdentity {
+        CredentialIdentity(
+            subscriptionType: extractCredentials(from: tokenJSON)?.subscriptionType,
+            accountUuid: oauthAccount["accountUuid"]?.value as? String,
+            organizationUuid: oauthAccount["organizationUuid"]?.value as? String,
+            email: oauthAccount["emailAddress"]?.value as? String
+        )
+    }
+
+    /// Whether the live credential pair is consistent with the account's
+    /// known-good backup fingerprint. Returns `true` when no prior backup exists
+    /// (nothing to contradict — first capture after a clean login) and when the
+    /// live pair `describesSameAccount(as:)` the backup. Returns `false` only on
+    /// a positive conflict, so a desynced live slot is never persisted or
+    /// trusted over the stored known-good credentials.
+    func liveCredentialsConsistentWithBackup(accountId: String, liveToken: String, liveOAuth: [String: AnyCodable]) async -> Bool {
+        guard let backup = await KeychainService.shared.getAccountBackup(forAccountId: accountId) else {
+            return true // no known-good yet; the login/add flow already vouched
+        }
+        let live = Self.credentialIdentity(tokenJSON: liveToken, oauthAccount: liveOAuth)
+        let known = Self.credentialIdentity(tokenJSON: backup.token, oauthAccount: backup.oauthAccount)
+        let ok = live.describesSameAccount(as: known)
+        if !ok {
+            log.error("[identity] Live credentials desynced vs backup for \(accountId): live(sub=\(live.subscriptionType ?? "nil"), org=\(live.organizationUuid ?? "nil")) != known(sub=\(known.subscriptionType ?? "nil"), org=\(known.organizationUuid ?? "nil"))")
+        }
+        return ok
     }
 
     // MARK: - OAuth Token Refresh
@@ -474,11 +540,12 @@ final class ClaudeService: @unchecked Sendable {
             // The source is still live at this step, so `auth status` reflects
             // its token — this blocks a token↔oauthAccount desync from stashing
             // a foreign token under the source's backup slot.
-            if email == currentAccount.email, await liveTokenIdentityMatches(currentAccount.email) {
+            if email == currentAccount.email, await liveTokenIdentityMatches(currentAccount.email),
+               await liveCredentialsConsistentWithBackup(accountId: currentAccount.id.uuidString, liveToken: sourceToken, liveOAuth: sourceOAuth) {
                 let saved = await keychain.saveAccountBackup(token: sourceToken, oauthAccount: sourceOAuth, forAccountId: currentAccount.id.uuidString)
                 log.info("[switchAccount] Step 1: Backup saved: \(saved)")
             } else {
-                log.warning("[switchAccount] Step 1: identity check failed (oauthAccount=\(email), source=\(currentAccount.email)); skipping backup")
+                log.warning("[switchAccount] Step 1: identity/consistency check failed (oauthAccount=\(email), source=\(currentAccount.email)); skipping backup to avoid persisting a desynced live slot")
             }
         } else {
             log.warning("[switchAccount] Step 1: Could not read current token or oauthAccount")
@@ -557,7 +624,13 @@ final class ClaudeService: @unchecked Sendable {
     /// moment of desynced app/CLI state can write account A's credentials into
     /// account B's backup slot (the bug that made a personal-Max account report
     /// a team subscription and team limits).
-    func captureCurrentCredentials(forAccountId accountId: String, expectedEmail: String) async -> Bool {
+    /// `authoritative` marks captures that follow an explicit, just-completed
+    /// `claude auth login` for `expectedEmail` (add / re-auth flows): the live
+    /// slot IS the new truth and must reset the stored baseline even if it
+    /// conflicts with a stale/contaminated backup. Opportunistic captures
+    /// (backing up the current account before switching away) leave it `false`,
+    /// so a desynced live slot can never overwrite a known-good backup.
+    func captureCurrentCredentials(forAccountId accountId: String, expectedEmail: String, authoritative: Bool = false) async -> Bool {
         log.info("[capture] Capturing credentials for account \(accountId) (expect \(expectedEmail))...")
         let keychain = KeychainService.shared
 
@@ -582,6 +655,18 @@ final class ClaudeService: @unchecked Sendable {
         let email = (oauthAccount["emailAddress"]?.value as? String) ?? "?"
         guard email == expectedEmail else {
             log.warning("[capture] Identity mismatch: live account is \(email) but expected \(expectedEmail); refusing to save backup")
+            return false
+        }
+        // Even with the email agreeing, the live token blob and oauthAccount can
+        // describe different accounts (a CLI-induced desync). For opportunistic
+        // captures, if we already hold a known-good backup, refuse to overwrite
+        // it with a live pair that conflicts on plan/account/org — that is
+        // exactly how a team token once got persisted under a max account's
+        // slot. Authoritative captures (post-login/re-auth) skip this: they are
+        // meant to reset the baseline.
+        if !authoritative,
+           await !liveCredentialsConsistentWithBackup(accountId: accountId, liveToken: token, liveOAuth: oauthAccount) {
+            log.error("[capture] Live credentials desynced vs known-good backup for \(expectedEmail); refusing to overwrite")
             return false
         }
         log.info("[capture] Token + oauthAccount found (email=\(email)), saving backup...")

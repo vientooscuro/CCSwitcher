@@ -316,7 +316,7 @@ final class AppState: ObservableObject {
 
             if let existing = accounts.firstIndex(where: { $0.email == email }) {
                 log.info("[loginNewAccount] Step 4: Account already exists, refreshing backup")
-                _ = await claudeService.captureCurrentCredentials(forAccountId: accounts[existing].id.uuidString, expectedEmail: email)
+                _ = await claudeService.captureCurrentCredentials(forAccountId: accounts[existing].id.uuidString, expectedEmail: email, authoritative: true)
                 errorMessage = String(localized: "Account already exists - credentials refreshed", bundle: L10n.bundle)
                 isLoggingIn = false
                 return
@@ -461,7 +461,7 @@ final class AppState: ObservableObject {
                 return
             }
 
-            let captured = await claudeService.captureCurrentCredentials(forAccountId: account.id.uuidString, expectedEmail: account.email)
+            let captured = await claudeService.captureCurrentCredentials(forAccountId: account.id.uuidString, expectedEmail: account.email, authoritative: true)
             log.info("[reauth] Token capture result: \(captured)")
 
             if let index = accounts.firstIndex(where: { $0.id == account.id }) {
@@ -550,6 +550,21 @@ final class AppState: ObservableObject {
             let tokenJSON: String?
             if account.isActive {
                 tokenJSON = await keychain.readClaudeToken()
+                // The live keychain token and ~/.claude.json oauthAccount live in
+                // separate stores and can be swapped onto different accounts by
+                // the Claude CLI. When that happens the live token may actually
+                // belong to another account, so querying usage with it would
+                // attribute a foreign session/plan to this account (the "both
+                // subscriptions show identical numbers" bug). Compare the live
+                // pair against this account's known-good backup fingerprint;
+                // on a conflict, surface a re-auth prompt instead of wrong data.
+                if let tokenJSON, let liveOAuth = await keychain.readOAuthAccount(),
+                   !(await claudeService.liveCredentialsConsistentWithBackup(accountId: account.id.uuidString, liveToken: tokenJSON, liveOAuth: liveOAuth)) {
+                    log.warning("[fetchUsage] \(account.email): live slot desynced vs backup — flagging re-auth, skipping usage")
+                    accountUsage[account.id] = nil
+                    freshErrors[account.id] = UsageErrorState(isExpired: true, isRateLimited: false, message: String(localized: "This account's live session was changed by Claude (wrong workspace/plan). Re-authenticate this account in Claude Code.", bundle: L10n.bundle))
+                    continue
+                }
             } else {
                 tokenJSON = await keychain.getAccountBackup(forAccountId: account.id.uuidString)?.token
             }
