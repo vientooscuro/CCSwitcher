@@ -616,6 +616,46 @@ final class ClaudeService: @unchecked Sendable {
         }
     }
 
+    /// Restore the live credential slot (keychain token + `~/.claude.json`
+    /// oauthAccount) from this account's known-good backup.
+    ///
+    /// Used to self-heal a desynced live slot: the Claude CLI can leave the
+    /// keychain token and the oauthAccount file describing different accounts
+    /// (e.g. another account's team token paired with this account's identity),
+    /// which makes the usage endpoint report a foreign plan's limits. Since the
+    /// backup is the last credential pair we verified, writing it back restores
+    /// a coherent live slot without making the user re-authenticate.
+    ///
+    /// Writes oauthAccount first, token second, mirroring `switchAccount`, and
+    /// rolls the file back if the token write fails so we never leave a
+    /// half-applied pair. The backup's access token is typically stale, so the
+    /// CLI is asked to refresh it — it must remain the single writer of the live
+    /// token (see the `.expired` handling in `fetchAllAccountUsage`).
+    func restoreLiveSlotFromBackup(accountId: String, email: String) async -> Bool {
+        let keychain = KeychainService.shared
+        guard let backup = await keychain.getAccountBackup(forAccountId: accountId) else {
+            log.error("[restore] No known-good backup for \(email); cannot self-heal")
+            return false
+        }
+        let previousOAuth = await keychain.readOAuthAccount()
+
+        log.info("[restore] Restoring live slot for \(email) from known-good backup")
+        guard await keychain.writeOAuthAccount(backup.oauthAccount) else {
+            log.error("[restore] Failed to write oauthAccount for \(email)")
+            return false
+        }
+        guard await keychain.writeClaudeToken(backup.token) else {
+            log.error("[restore] Failed to write token for \(email); rolling back oauthAccount")
+            if let previousOAuth { _ = await keychain.writeOAuthAccount(previousOAuth) }
+            return false
+        }
+
+        // Let the CLI mint a fresh access token from the restored refresh token.
+        _ = try? await getAuthStatus()
+        log.info("[restore] Live slot restored for \(email)")
+        return true
+    }
+
     /// Capture the current Claude auth token + oauthAccount and associate with an account.
     ///
     /// `expectedEmail` is the account we believe is currently active. Before

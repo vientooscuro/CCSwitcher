@@ -76,6 +76,13 @@ final class AppState: ObservableObject {
     private var accountUsageLastAttempt: [UUID: Date] = [:]
     private static let inactiveUsageMinInterval: TimeInterval = 15 * 60
 
+    /// Per-account timestamp of the last live-slot self-heal attempt. The
+    /// Claude CLI owns the live slot too, so if it keeps rewriting credentials
+    /// we would restore-then-be-clobbered on every poll. Throttling bounds that
+    /// to one restore per `restoreMinInterval` and keeps the log readable.
+    private var accountLastRestoreAttempt: [UUID: Date] = [:]
+    private static let restoreMinInterval: TimeInterval = 10 * 60
+
     /// In-flight refresh tasks keyed by accountId. Two simultaneous
     /// `fetchAllAccountUsage` invocations on the same expired token would
     /// otherwise both call `refreshOAuthToken`; the first one would consume
@@ -500,6 +507,7 @@ final class AppState: ObservableObject {
         accountUsageRateLimitedUntil[accountId] = nil
         accountRefreshTokenInvalid.remove(accountId)
         accountUsageLastAttempt[accountId] = nil
+        accountLastRestoreAttempt[accountId] = nil
     }
 
     private func fetchAllAccountUsage(force: Bool = false) async {
@@ -547,7 +555,7 @@ final class AppState: ObservableObject {
                 }
                 continue
             }
-            let tokenJSON: String?
+            var tokenJSON: String?
             if account.isActive {
                 tokenJSON = await keychain.readClaudeToken()
                 // The live keychain token and ~/.claude.json oauthAccount live in
@@ -556,14 +564,34 @@ final class AppState: ObservableObject {
                 // belong to another account, so querying usage with it would
                 // attribute a foreign session/plan to this account (the "both
                 // subscriptions show identical numbers" bug). Compare the live
-                // pair against this account's known-good backup fingerprint;
-                // on a conflict, surface a re-auth prompt instead of wrong data.
-                if let tokenJSON, let liveOAuth = await keychain.readOAuthAccount(),
-                   !(await claudeService.liveCredentialsConsistentWithBackup(accountId: account.id.uuidString, liveToken: tokenJSON, liveOAuth: liveOAuth)) {
-                    log.warning("[fetchUsage] \(account.email): live slot desynced vs backup — flagging re-auth, skipping usage")
-                    accountUsage[account.id] = nil
-                    freshErrors[account.id] = UsageErrorState(isExpired: true, isRateLimited: false, message: String(localized: "This account's live session was changed by Claude (wrong workspace/plan). Re-authenticate this account in Claude Code.", bundle: L10n.bundle))
-                    continue
+                // pair against this account's known-good backup fingerprint and
+                // self-heal by restoring that backup; only ask the user to
+                // re-authenticate when restoring can't produce a coherent pair.
+                if let live = tokenJSON, let liveOAuth = await keychain.readOAuthAccount(),
+                   !(await claudeService.liveCredentialsConsistentWithBackup(accountId: account.id.uuidString, liveToken: live, liveOAuth: liveOAuth)) {
+                    let throttled = accountLastRestoreAttempt[account.id].map { now.timeIntervalSince($0) < Self.restoreMinInterval } ?? false
+                    var healed = false
+                    if !throttled {
+                        accountLastRestoreAttempt[account.id] = now
+                        healed = await claudeService.restoreLiveSlotFromBackup(accountId: account.id.uuidString, email: account.email)
+                        if healed {
+                            // Re-verify: a backup that is itself contaminated must
+                            // not pass through as good data just because we wrote it.
+                            tokenJSON = await keychain.readClaudeToken()
+                            if let restored = tokenJSON, let restoredOAuth = await keychain.readOAuthAccount() {
+                                healed = await claudeService.liveCredentialsConsistentWithBackup(accountId: account.id.uuidString, liveToken: restored, liveOAuth: restoredOAuth)
+                            } else {
+                                healed = false
+                            }
+                        }
+                    }
+                    guard healed else {
+                        log.warning("[fetchUsage] \(account.email): live slot desynced, self-heal \(throttled ? "throttled" : "failed") — flagging re-auth")
+                        accountUsage[account.id] = nil
+                        freshErrors[account.id] = UsageErrorState(isExpired: true, isRateLimited: false, message: String(localized: "This account's live session was changed by Claude (wrong workspace/plan). Re-authenticate this account in Claude Code.", bundle: L10n.bundle))
+                        continue
+                    }
+                    log.info("[fetchUsage] \(account.email): live slot self-healed from known-good backup")
                 }
             } else {
                 tokenJSON = await keychain.getAccountBackup(forAccountId: account.id.uuidString)?.token
