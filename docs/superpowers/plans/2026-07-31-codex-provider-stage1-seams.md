@@ -1055,7 +1055,7 @@ xcodegen generate
 xcodebuild test -project CCSwitcher.xcodeproj -scheme CCSwitcher -destination 'platform=macOS' -only-testing:CCSwitcherTests/ClaudeDisplayMapperTests 2>&1 | tail -20
 ```
 
-Expected: `** TEST SUCCEEDED **`, 17 tests.
+Expected: `** TEST SUCCEEDED **`, 16 tests.
 
 - [ ] **Step 5: Commit**
 
