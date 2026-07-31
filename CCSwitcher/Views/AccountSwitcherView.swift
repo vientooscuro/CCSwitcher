@@ -2,8 +2,8 @@ import SwiftUI
 
 /// Lists all configured accounts with switching and management.
 struct AccountSwitcherView: View {
-    @EnvironmentObject private var appState: AppState
-    @AppStorage("showFullEmail") private var showFullEmail = false
+    @EnvironmentObject private var hub: ProviderHub
+    @Environment(\.providerTheme) private var theme
     @State private var showingAddConfirm = false
     @State private var editingAccountId: UUID?
     @State private var editingLabel = ""
@@ -14,11 +14,11 @@ struct AccountSwitcherView: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(spacing: 12) {
-                    if appState.accounts.isEmpty {
+                    if hub.surface.accountRows.isEmpty {
                         emptyState
                     } else {
-                        ForEach(appState.accounts) { account in
-                            accountRow(account)
+                        ForEach(hub.surface.accountRows) { row in
+                            accountRow(row)
                         }
                     }
                 }
@@ -38,14 +38,14 @@ struct AccountSwitcherView: View {
         VStack(spacing: 12) {
             Image(systemName: "person.crop.circle.badge.plus")
                 .font(.system(size: 40))
-                .foregroundStyle(.textSecondary)
+                .foregroundStyle(theme.textSecondary)
 
             Text("No Accounts")
                 .font(.headline)
 
             Text("Add your current Claude Code account to get started.")
                 .font(.caption)
-                .foregroundStyle(.textSecondary)
+                .foregroundStyle(theme.textSecondary)
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
@@ -54,25 +54,25 @@ struct AccountSwitcherView: View {
 
     // MARK: - Account Row
 
-    private func accountRow(_ account: Account) -> some View {
+    private func accountRow(_ row: AccountRowModel) -> some View {
         HStack(spacing: 12) {
             // Provider icon
-            Image(systemName: account.provider.iconName)
+            Image(systemName: hub.activeProvider.iconName)
                 .font(.title2)
-                .foregroundStyle(account.isActive ? .brand : .secondary)
+                .foregroundStyle(row.isActive ? theme.accent : .secondary)
                 .frame(width: 32, height: 32)
 
             // Account info
             VStack(alignment: .leading, spacing: 2) {
-                if editingAccountId == account.id {
+                if editingAccountId == row.id {
                     HStack(spacing: 4) {
                         TextField("Custom label", text: $editingLabel)
                             .textFieldStyle(.roundedBorder)
                             .font(.subheadline)
-                            .onSubmit { commitLabelEdit(account) }
+                            .onSubmit { commitLabelEdit(row) }
 
                         Button {
-                            commitLabelEdit(account)
+                            commitLabelEdit(row)
                         } label: {
                             Image(systemName: "checkmark.circle.fill")
                                 .foregroundStyle(.green)
@@ -83,72 +83,75 @@ struct AccountSwitcherView: View {
                             editingAccountId = nil
                         } label: {
                             Image(systemName: "xmark.circle.fill")
-                                .foregroundStyle(.textSecondary)
+                                .foregroundStyle(theme.textSecondary)
                         }
                         .buttonStyle(.plain)
                     }
                 } else {
                     HStack(spacing: 6) {
-                        Text(account.effectiveDisplayName(obfuscated: !showFullEmail))
+                        Text(row.title)
                             .font(.subheadline.weight(.medium))
 
                         Button {
-                            editingLabel = account.customLabel ?? ""
-                            editingAccountId = account.id
+                            editingLabel = row.rawLabel ?? ""
+                            editingAccountId = row.id
                         } label: {
                             Image(systemName: "pencil")
                                 .font(.caption2)
-                                .foregroundStyle(.textSecondary)
+                                .foregroundStyle(theme.textSecondary)
                         }
                         .buttonStyle(.plain)
                         .help("Edit label")
 
-                        if account.isActive {
+                        if row.isActive {
                             Badge(text: String(localized: "Active", bundle: L10n.bundle), color: .green)
                         }
                     }
                 }
 
-                Text(account.displayEmail(obfuscated: !showFullEmail))
+                Text(row.email)
                     .font(.caption)
-                    .foregroundStyle(.textSecondary)
+                    .foregroundStyle(theme.textSecondary)
 
                 HStack(spacing: 8) {
-                    if let sub = account.displaySubscriptionType {
+                    if let sub = row.planBadge {
                         Label(sub, systemImage: "creditcard")
                             .font(.caption2)
-                            .foregroundStyle(.textSecondary)
+                            .foregroundStyle(theme.textSecondary)
                     }
-                    Text(account.provider.rawValue)
+                    Text(hub.activeProvider.rawValue)
                         .font(.caption2)
-                        .foregroundStyle(.textSecondary)
+                        .foregroundStyle(theme.textSecondary)
                 }
             }
 
             Spacer()
 
             // Actions
-            if !account.isActive {
+            if hub.surface.capabilities.canSwitchAccounts, !row.isActive {
                 Button("Switch") {
-                    Task { await appState.switchTo(account) }
+                    Task { await hub.surface.switchTo(accountId: row.id) }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
-                .tint(.brand)
+                .tint(theme.accent)
+                .disabled(!row.hasStoredCredentials)
+            }
+
+            if hub.surface.capabilities.canReauthenticate {
+                Button {
+                    Task { await hub.surface.reauthenticate(id: row.id) }
+                } label: {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                .buttonStyle(.plain)
+                .help("Re-authenticate (fix stale token)")
             }
 
             Button {
-                Task { await appState.reauthenticateAccount(account) }
-            } label: {
-                Image(systemName: "arrow.triangle.2.circlepath")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-            .buttonStyle(.plain)
-            .help("Re-authenticate (fix stale token)")
-
-            Button {
-                appState.removeAccount(account)
+                hub.surface.removeAccount(id: row.id)
             } label: {
                 Image(systemName: "trash")
                     .font(.caption)
@@ -160,14 +163,14 @@ struct AccountSwitcherView: View {
         .padding(12)
         .background(
             RoundedRectangle(cornerRadius: 10)
-                .fill(account.isActive ? .cardFillStrong : .clear)
-                .strokeBorder(.cardBorder, lineWidth: 1)
+                .fill(row.isActive ? theme.cardFillStrong : .clear)
+                .strokeBorder(theme.cardBorder, lineWidth: 1)
                 .shadow(color: AppStyle.cardShadowColor, radius: AppStyle.cardShadowRadius, x: 0, y: AppStyle.cardShadowY)
         )
     }
 
-    private func commitLabelEdit(_ account: Account) {
-        appState.updateAccountLabel(account, label: editingLabel)
+    private func commitLabelEdit(_ row: AccountRowModel) {
+        hub.surface.setLabel(editingLabel, forAccount: row.id)
         editingAccountId = nil
     }
 
@@ -175,14 +178,14 @@ struct AccountSwitcherView: View {
 
     @ViewBuilder
     private var addAccountButtons: some View {
-        if appState.isLoggingIn {
+        if hub.surface.isAuthenticating {
             // Logging in state
             VStack(spacing: 8) {
                 ProgressView()
                     .controlSize(.small)
                 Text("Waiting for browser login...")
                     .font(.caption)
-                    .foregroundStyle(.textSecondary)
+                    .foregroundStyle(theme.textSecondary)
                 Text("Complete the login in your browser, then return here.")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
@@ -192,8 +195,8 @@ struct AccountSwitcherView: View {
             .padding(12)
             .background(
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(.cardFillStrong)
-                    .strokeBorder(.cardBorder, lineWidth: 1)
+                    .fill(theme.cardFillStrong)
+                    .strokeBorder(theme.cardBorder, lineWidth: 1)
                     .shadow(color: AppStyle.cardShadowColor, radius: AppStyle.cardShadowRadius, x: 0, y: AppStyle.cardShadowY)
             )
         } else if showingAddConfirm {
@@ -201,7 +204,7 @@ struct AccountSwitcherView: View {
             VStack(spacing: 8) {
                 Text("This will capture the currently logged-in Claude Code account.")
                     .font(.caption)
-                    .foregroundStyle(.textSecondary)
+                    .foregroundStyle(theme.textSecondary)
                     .multilineTextAlignment(.center)
 
                 HStack(spacing: 12) {
@@ -213,55 +216,59 @@ struct AccountSwitcherView: View {
 
                     Button("Add Account") {
                         showingAddConfirm = false
-                        Task { await appState.addAccount() }
+                        Task { await hub.surface.importCurrentAccount() }
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(.brand)
+                    .tint(theme.accent)
                     .controlSize(.small)
                 }
             }
             .padding(12)
             .background(
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(.cardFillStrong)
-                    .strokeBorder(.cardBorder, lineWidth: 1)
+                    .fill(theme.cardFillStrong)
+                    .strokeBorder(theme.cardBorder, lineWidth: 1)
                     .shadow(color: AppStyle.cardShadowColor, radius: AppStyle.cardShadowRadius, x: 0, y: AppStyle.cardShadowY)
             )
         } else {
             VStack(spacing: 8) {
                 // Primary: Login new account via browser
-                Button {
-                    Task { await appState.loginNewAccount() }
-                } label: {
-                    Label("Login New Account", systemImage: "person.badge.plus")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundColor(AppStyle.buttonTextColor)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .background(Color.white, in: RoundedRectangle(cornerRadius: 8))
+                if hub.surface.capabilities.canLoginNewAccount {
+                    Button {
+                        Task { await hub.surface.loginNewAccount() }
+                    } label: {
+                        Label("Login New Account", systemImage: "person.badge.plus")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundColor(AppStyle.buttonTextColor)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(Color.white, in: RoundedRectangle(cornerRadius: 8))
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
 
                 // Secondary: Capture already-logged-in account
-                Button {
-                    withAnimation { showingAddConfirm = true }
-                } label: {
-                    Label("Add Current Account", systemImage: "plus.circle")
-                        .font(.caption)
-                        .foregroundStyle(.textSecondary)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8)
-                                .strokeBorder(
-                                    colorScheme == .dark
-                                        ? Color.gray.opacity(0.4)
-                                        : Color.white.opacity(0.22),
-                                    lineWidth: 1
-                                )
-                        )
+                if hub.surface.capabilities.canImportCurrent {
+                    Button {
+                        withAnimation { showingAddConfirm = true }
+                    } label: {
+                        Label("Add Current Account", systemImage: "plus.circle")
+                            .font(.caption)
+                            .foregroundStyle(theme.textSecondary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .strokeBorder(
+                                        colorScheme == .dark
+                                            ? Color.gray.opacity(0.4)
+                                            : Color.white.opacity(0.22),
+                                        lineWidth: 1
+                                    )
+                            )
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
         }
     }
