@@ -282,6 +282,8 @@ struct MainMenuView: View {
 
             Spacer()
 
+            ProviderSwitcherView()
+
             if hub.surface.isLoading {
                 ProgressView()
                     .controlSize(.small)

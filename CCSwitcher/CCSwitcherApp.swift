@@ -21,6 +21,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 struct CCSwitcherApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var appState: AppState
+    @StateObject private var codexState: CodexState
     @StateObject private var providerHub: ProviderHub
     @StateObject private var updateChecker = UpdateChecker()
     @StateObject private var menuBarConfig = MenuBarConfig.shared
@@ -31,18 +32,17 @@ struct CCSwitcherApp: App {
     @State private var didBootstrap = false
 
     init() {
-        let state = AppState()
+        let claude = AppState()
+        let codex = CodexState()
         let available = ProviderRegistry.detect(
             claudeInstalled: true,   // corrected asynchronously via AppState.claudeAvailable
             fileExists: { FileManager.default.fileExists(atPath: $0) }
         )
-        _appState = StateObject(wrappedValue: state)
-        // Stage 1 has no CodexState surface yet, so filter Codex out here even if
-        // detected — registering it would give the hub a segment with nothing
-        // behind it. Stage 2 removes this filter once CodexState exists.
+        _appState = StateObject(wrappedValue: claude)
+        _codexState = StateObject(wrappedValue: codex)
         _providerHub = StateObject(wrappedValue: ProviderHub(
-            surfaces: [.claudeCode: state],
-            available: available.filter { $0 == .claudeCode }
+            surfaces: [.claudeCode: claude, .codex: codex],
+            available: available
         ))
     }
 
