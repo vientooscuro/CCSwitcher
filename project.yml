@@ -106,3 +106,33 @@ targets:
         com.apple.security.app-sandbox: true
         com.apple.security.application-groups:
           - XTPJK8U436.com.vientooscuro.ccswitcher
+
+  CCSwitcherTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: CCSwitcherTests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.vientooscuro.ccswitcher.tests
+        GENERATE_INFOPLIST_FILE: true
+        SWIFT_VERSION: "6.0"
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: XTPJK8U436
+        SWIFT_STRICT_CONCURRENCY: targeted
+    dependencies:
+      - target: CCSwitcher
+
+schemes:
+  CCSwitcher:
+    build:
+      targets:
+        CCSwitcher: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - CCSwitcherTests
