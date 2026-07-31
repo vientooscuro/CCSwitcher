@@ -216,18 +216,21 @@ protocol ProviderSurface: AnyObject, ObservableObject {
     var providerType: AIProviderType { get }
     var isAvailable: Bool { get }
     var isLoading: Bool { get }
+    var isAuthenticating: Bool { get }
     var errorMessage: String? { get }
     var lastRefresh: Date? { get }
     var capabilities: ProviderCapabilities { get }
 
     var header: AccountHeaderModel? { get }
-    var accountCards: [UsageCardModel] { get }
+    var accountCards: [UsageCardModel] { get }   // Usage tab
+    var accountRows: [AccountRowModel] { get }   // Accounts tab
     var activity: ActivitySummaryModel { get }
     var cost: CostSeriesModel { get }
 
     func refresh(force: Bool) async
     func switchTo(accountId: UUID) async
-    func addAccount() async
+    func importCurrentAccount() async            // adopt whoever the CLI is signed in as
+    func loginNewAccount() async                 // browser OAuth for a new account
     func removeAccount(id: UUID)
     func reauthenticate(id: UUID) async
     func setLabel(_ label: String?, forAccount id: UUID)
@@ -235,11 +238,17 @@ protocol ProviderSurface: AnyObject, ObservableObject {
 
 struct ProviderCapabilities {
     let canSwitchAccounts: Bool
-    let canAddAccount: Bool
+    let canImportCurrent: Bool
+    let canLoginNewAccount: Bool
     let canReauthenticate: Bool
     let tracksLinesWritten: Bool
 }
 ```
+
+`importCurrentAccount` and `loginNewAccount` stay distinct because the existing
+Claude UI offers both and they are genuinely different operations: one adopts the
+account the CLI is already signed in as, the other runs a browser OAuth round
+trip. Collapsing them would be a behaviour regression for Claude.
 
 `capabilities` lets a view hide an action a provider cannot perform, instead of
 each provider stubbing a method that silently does nothing.
@@ -288,7 +297,15 @@ struct ScopedLimitModel: Identifiable {
     let modelName: String      // "Fable 5" | "GPT-5.3-Codex-Spark"
     let utilization: Double
     let resetsAt: Date?
+    let tint: Color            // provider supplies it; see note below
     var id: String { modelName }
+}
+
+struct ModelUsageEntry: Identifiable {
+    let displayName: String    // "Opus" | "gpt-5.6-sol"
+    let count: Int
+    let tint: Color
+    var id: String { displayName }
 }
 
 struct CreditPoolModel {
@@ -328,12 +345,31 @@ struct CostSeriesModel {
     let todayCost: Double
     let daily: [DailyCostEntry]        // date, cost, per-model breakdown, tokens
 }
+
+struct AccountRowModel: Identifiable {
+    let id: UUID
+    let title: String
+    let email: String
+    let planBadge: String?
+    let isActive: Bool
+    let lastUsedText: String?
+    let hasStoredCredentials: Bool
+    let rawLabel: String?              // seeds the inline rename field
+}
 ```
 
 Window classification is a single shared function:
-`≤ 6h → .session`, `6h … 8d → .weekly`, else `.other`. It is what lets the same
-card render Claude's fixed five-hour/seven-day pair and Codex's
+`≤ 6h → .session`, `6h … 8d → .weekly`, else `.other(seconds:)`. It is what lets
+the same card render Claude's fixed five-hour/seven-day pair and Codex's
 data-defined windows without a branch in the view.
+
+`Kind` carries no text, only shape. The view resolves `.session` / `.weekly` to
+localized strings and `.other` to a formatted duration, so localization stays in
+the view layer instead of leaking into the models.
+
+Model tints come from the provider rather than from a switch in the view. The
+current `modelColor` maps Fable / Opus / Sonnet / Haiku, which is meaningless for
+`gpt-5.6-sol`; each provider therefore supplies the tint alongside the name.
 
 ### `ProviderTheme`
 
