@@ -507,6 +507,9 @@ struct DailyCostEntry: Identifiable {
     /// "yyyy-MM-dd".
     let date: String
     let cost: Double
+    /// Nil when the provider cannot count sessions; the view hides the label.
+    /// Claude counts JSONL session files, Codex counts rollout files.
+    let sessionCount: Int?
     let modelBreakdown: [String: Double]
     let inputTokens: Int
     let outputTokens: Int
@@ -1036,6 +1039,7 @@ enum ClaudeDisplayMapper {
                 DailyCostEntry(
                     date: day.date,
                     cost: day.totalCost,
+                    sessionCount: day.sessionCount,
                     modelBreakdown: day.modelBreakdown,
                     inputTokens: day.inputTokens,
                     outputTokens: day.outputTokens,
@@ -1966,7 +1970,9 @@ Change every `[DailyCost]` annotation to `[DailyCostEntry]` and every `day: Dail
 
 Inside those functions, `DailyCost.totalCost` becomes `DailyCostEntry.cost`. `date`, `modelBreakdown`, `totalTokens` and the four token counts keep their names.
 
-`DailyCost.sessionCount` has no counterpart on `DailyCostEntry`. If `dailyRow` displays it, delete that element: session counts are a Claude-JSONL artifact with no Codex equivalent, and the row already shows cost and tokens.
+`DailyCostEntry.sessionCount` is `Int?`, so it maps straight across from `DailyCost.sessionCount`. Codex has the same concept — one rollout file is one session — so nothing is dropped.
+
+Watch out: the `sessionCount` reference is **not** in `dailyRow`. It is in `todayCard`, which renders `Label("\(today.sessionCount) sessions", systemImage: "terminal")` in the model-breakdown footer. Because the field is now optional, wrap that label in `if let sessions = today.sessionCount`. Do not delete it.
 
 - [ ] **Step 4: Point the view at the theme**
 

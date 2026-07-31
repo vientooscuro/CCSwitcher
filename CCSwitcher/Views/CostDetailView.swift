@@ -56,6 +56,11 @@ struct CostDetailView: View {
                 }
 
                 HStack {
+                    if let sessions = today.sessionCount {
+                        Label("\(sessions) sessions", systemImage: "terminal")
+                            .font(.caption2)
+                            .foregroundStyle(theme.textSecondary)
+                    }
                     Spacer()
                     Text("\(formatTokenCount(today.totalTokens)) tokens")
                         .font(.caption2)

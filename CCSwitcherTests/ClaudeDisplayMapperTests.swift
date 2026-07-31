@@ -155,6 +155,7 @@ final class ClaudeDisplayMapperTests: XCTestCase {
         XCTAssertEqual(model.todayCost, 319.57, accuracy: 0.0001)
         XCTAssertEqual(model.daily.count, 1)
         XCTAssertEqual(model.daily[0].totalTokens, 100)
+        XCTAssertEqual(model.daily[0].sessionCount, 3)
         XCTAssertEqual(model.totalCost, 319.57, accuracy: 0.0001)
     }
 

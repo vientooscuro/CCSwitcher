@@ -122,6 +122,7 @@ enum ClaudeDisplayMapper {
                 DailyCostEntry(
                     date: day.date,
                     cost: day.totalCost,
+                    sessionCount: day.sessionCount,
                     modelBreakdown: day.modelBreakdown,
                     inputTokens: day.inputTokens,
                     outputTokens: day.outputTokens,

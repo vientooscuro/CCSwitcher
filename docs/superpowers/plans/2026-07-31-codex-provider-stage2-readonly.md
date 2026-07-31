@@ -1767,7 +1767,9 @@ actor CodexSessionCache {
     func costSeries() async -> CostSeriesModel {
         ensureLoaded()
 
-        var byDate: [String: (cost: Double, models: [String: Double], totals: CodexTokenTotals)] = [:]
+        // `sessions` counts distinct rollout files contributing to a date — one
+        // file is one Codex session, matching what the Claude side reports.
+        var byDate: [String: (cost: Double, models: [String: Double], totals: CodexTokenTotals, sessions: Int)] = [:]
         var modelIds: Set<String> = []
         for aggregate in files.values {
             for (_, models) in aggregate.tokens { modelIds.formUnion(models.keys) }
@@ -1779,6 +1781,10 @@ actor CodexSessionCache {
 
         for aggregate in files.values {
             for (date, models) in aggregate.tokens {
+                var entry = byDate[date] ?? (0, [:], CodexTokenTotals(), 0)
+                // One file contributing to this date is one session, counted once
+                // regardless of how many models it used.
+                entry.sessions += 1
                 for (model, totals) in models {
                     let cost = (prices[model] ?? nil)?.openAICost(
                         inputTokens: totals.inputTokens,
@@ -1786,12 +1792,11 @@ actor CodexSessionCache {
                         cacheWriteTokens: totals.cacheWriteTokens,
                         outputTokens: totals.outputTokens
                     ) ?? 0
-                    var entry = byDate[date] ?? (0, [:], CodexTokenTotals())
                     entry.cost += cost
                     entry.models[model, default: 0] += cost
                     entry.totals = entry.totals + totals
-                    byDate[date] = entry
                 }
+                byDate[date] = entry
             }
         }
 
@@ -1801,6 +1806,7 @@ actor CodexSessionCache {
                 DailyCostEntry(
                     date: date,
                     cost: entry.cost,
+                    sessionCount: entry.sessions,
                     modelBreakdown: entry.models,
                     inputTokens: entry.totals.inputTokens,
                     outputTokens: entry.totals.outputTokens,
