@@ -1824,7 +1824,9 @@ actor CodexSessionCache {
 
     /// Today's activity. Per-file active minutes are summed, which means
     /// parallel sessions stack — the same approximation the Claude parser makes
-    /// and the same one the UI tooltip already describes.
+    /// and the same one the UI tooltip already describes. With heavy subagent
+    /// use this legitimately reaches tens of hours in a single day: 70 sessions
+    /// were active on one measured day, 68 of them subagents.
     func activityToday() -> ActivitySummaryModel {
         ensureLoaded()
         let today = Formatters.isoDay.string(from: Date())
