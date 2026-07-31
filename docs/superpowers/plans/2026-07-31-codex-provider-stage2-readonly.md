@@ -2297,6 +2297,7 @@ final class CodexState: ObservableObject, ProviderSurface {
             canImportCurrent: false,
             canLoginNewAccount: false,
             canReauthenticate: false,
+            managesAccounts: false,
             tracksLinesWritten: true
         )
     }

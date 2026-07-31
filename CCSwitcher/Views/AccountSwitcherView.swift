@@ -92,16 +92,18 @@ struct AccountSwitcherView: View {
                         Text(row.title)
                             .font(.subheadline.weight(.medium))
 
-                        Button {
-                            editingLabel = row.rawLabel ?? ""
-                            editingAccountId = row.id
-                        } label: {
-                            Image(systemName: "pencil")
-                                .font(.caption2)
-                                .foregroundStyle(theme.textSecondary)
+                        if hub.surface.capabilities.managesAccounts {
+                            Button {
+                                editingLabel = row.rawLabel ?? ""
+                                editingAccountId = row.id
+                            } label: {
+                                Image(systemName: "pencil")
+                                    .font(.caption2)
+                                    .foregroundStyle(theme.textSecondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Edit label")
                         }
-                        .buttonStyle(.plain)
-                        .help("Edit label")
 
                         if row.isActive {
                             Badge(text: String(localized: "Active", bundle: L10n.bundle), color: .green)
@@ -150,15 +152,17 @@ struct AccountSwitcherView: View {
                 .help("Re-authenticate (fix stale token)")
             }
 
-            Button {
-                hub.surface.removeAccount(id: row.id)
-            } label: {
-                Image(systemName: "trash")
-                    .font(.caption)
-                    .foregroundStyle(.red)
+            if hub.surface.capabilities.managesAccounts {
+                Button {
+                    hub.surface.removeAccount(id: row.id)
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+                .buttonStyle(.plain)
+                .help("Remove account")
             }
-            .buttonStyle(.plain)
-            .help("Remove account")
         }
         .padding(12)
         .background(

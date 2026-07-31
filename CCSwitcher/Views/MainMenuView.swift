@@ -265,7 +265,7 @@ struct MainMenuView: View {
                         Text(header.title)
                             .font(.headline)
                         if let plan = header.planBadge {
-                            Badge(text: plan, color: theme.accent)
+                            Badge(text: plan, color: theme.accent, foreground: theme.accentForeground)
                         }
                     }
                     Text(header.subtitle)

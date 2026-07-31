@@ -9,6 +9,10 @@ struct ProviderCapabilities {
     let canImportCurrent: Bool
     let canLoginNewAccount: Bool
     let canReauthenticate: Bool
+    /// Whether the provider owns its account list at all. False for a read-only
+    /// provider, which must not offer rename or remove either — a delete button
+    /// on a provider we cannot manage is worse than misleading.
+    let managesAccounts: Bool
     let tracksLinesWritten: Bool
 
     static let claude = ProviderCapabilities(
@@ -16,6 +20,7 @@ struct ProviderCapabilities {
         canImportCurrent: true,
         canLoginNewAccount: true,
         canReauthenticate: true,
+        managesAccounts: true,
         tracksLinesWritten: true
     )
 }

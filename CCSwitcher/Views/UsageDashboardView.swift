@@ -251,7 +251,7 @@ struct UsageDashboardView: View {
             Spacer()
 
             if let plan = card.planBadge {
-                Badge(text: plan, color: theme.accent)
+                Badge(text: plan, color: theme.accent, foreground: theme.accentForeground)
             }
         }
     }
