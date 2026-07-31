@@ -34,6 +34,17 @@ struct ProviderTheme {
     }
 }
 
+private extension Color {
+    /// 24-bit hex, for themes transcribed from a design reference.
+    init(hex: UInt32) {
+        self.init(
+            red: Double((hex >> 16) & 0xFF) / 255,
+            green: Double((hex >> 8) & 0xFF) / 255,
+            blue: Double(hex & 0xFF) / 255
+        )
+    }
+}
+
 extension ProviderTheme {
     /// Today's look, unchanged.
     static let claude = ProviderTheme(
@@ -54,10 +65,33 @@ extension ProviderTheme {
         forcedColorScheme: nil
     )
 
+    /// Modeled on ChatGPT Desktop: flat near-black, monochrome accents, hairline
+    /// borders. No brand orange participates.
+    ///
+    /// Utilization colours stay semantic (see `utilizationColor`) — a monochrome
+    /// bar makes the percentage unreadable at a glance, which defeats its purpose.
+    static let codex = ProviderTheme(
+        panel: .flat(Color(hex: 0x0D0D0D)),
+        accent: Color(hex: 0xFFFFFF),
+        accentForeground: Color(hex: 0x0D0D0D),
+        cardFill: Color(hex: 0x171717),
+        cardFillStrong: Color(hex: 0x1F1F1F),
+        cardBorder: Color(hex: 0x2E2E2E),
+        textPrimary: Color(hex: 0xECECEC),
+        textSecondary: Color(hex: 0x9A9A9A),
+        tabFill: Color(hex: 0x161616),
+        tabBorder: Color(hex: 0x2E2E2E),
+        tabSelectedFill: Color(hex: 0x303030),
+        tabSelectedForeground: Color(hex: 0xFFFFFF),
+        progressTrack: Color(hex: 0x2A2A2A),
+        subtleAccent: Color(hex: 0x1A1A1A),
+        forcedColorScheme: .dark
+    )
+
     static func theme(for provider: AIProviderType) -> ProviderTheme {
         switch provider {
         case .claudeCode: return .claude
-        case .codex: return .claude   // replaced by the Codex theme in stage 2
+        case .codex: return .codex
         case .gemini: return .claude
         }
     }
