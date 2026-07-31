@@ -8,6 +8,10 @@ struct MenuBarModulesSettingsView: View {
     @EnvironmentObject private var hub: ProviderHub
     @EnvironmentObject private var config: MenuBarConfig
 
+    // Separate from `hub.activeProvider` on purpose: choosing a provider here
+    // edits *that* provider's module list without changing which one is live
+    // in the popover, so you can configure Codex's strip while looking at Claude.
+    @State private var selectedProvider: AIProviderType = .claudeCode
     @State private var rows: [Row] = []
     @State private var tick: Date = Date()
     private let previewTimer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
@@ -16,6 +20,17 @@ struct MenuBarModulesSettingsView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text(String(localized: "Menu bar modules", bundle: L10n.bundle))
                 .font(.subheadline.weight(.semibold))
+
+            if hub.showsSwitcher {
+                Picker(String(localized: "Provider", bundle: L10n.bundle), selection: $selectedProvider) {
+                    ForEach(hub.available) { provider in
+                        Text(provider.rawValue).tag(provider)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .onChange(of: selectedProvider) { _, _ in load() }
+            }
 
             Text(String(localized: "Drag to reorder, toggle to enable. Disabled modules sit at the bottom.", bundle: L10n.bundle))
                 .font(.caption)
@@ -71,7 +86,10 @@ struct MenuBarModulesSettingsView: View {
             }
             .padding(.top, 2)
         }
-        .onAppear(perform: load)
+        .onAppear {
+            selectedProvider = hub.activeProvider
+            load()
+        }
         .onReceive(previewTimer) { tick = $0 }
     }
 
@@ -100,8 +118,12 @@ struct MenuBarModulesSettingsView: View {
 
     // MARK: - State helpers
 
+    /// Reads `selectedProvider`'s own storage key directly rather than
+    /// `config.modules` — `config` only ever holds the *active* provider's
+    /// list, and the picker above can select a different one.
     private func load() {
-        let enabled = config.modules
+        let key = MenuBarModuleStore.storageKey(for: selectedProvider)
+        let enabled = MenuBarModuleStore.decode(UserDefaults.standard.data(forKey: key) ?? Data())
         let enabledSet = Set(enabled)
 
         // Enabled modules first, in user order; then any remaining (disabled).
@@ -113,7 +135,17 @@ struct MenuBarModulesSettingsView: View {
     }
 
     private func persist() {
-        config.set(rows.filter(\.isEnabled).map(\.module))
+        let enabled = rows.filter(\.isEnabled).map(\.module)
+        let key = MenuBarModuleStore.storageKey(for: selectedProvider)
+        UserDefaults.standard.set(MenuBarModuleStore.encode(enabled), forKey: key)
+
+        // `config` tracks whichever provider is active in the popover; keep it
+        // in sync only when that happens to be the one being edited here, so
+        // the live strip still updates instantly for the common case without
+        // this Settings selection ever driving which provider is active.
+        if selectedProvider == hub.activeProvider {
+            config.set(enabled)
+        }
     }
 
     // MARK: - Row

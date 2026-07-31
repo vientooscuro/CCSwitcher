@@ -19,13 +19,19 @@ final class MenuBarConfig: ObservableObject {
         didSet { persist() }
     }
 
-    private let storageKey = MenuBarModuleStore.storageKey
+    /// Which provider `modules` currently reflects. The strip always renders
+    /// whichever provider is active, so this follows `ProviderHub.activeProvider`
+    /// rather than the Settings picker, which edits providers independently.
+    private(set) var provider: AIProviderType = .claudeCode
+
+    private var storageKey: String { MenuBarModuleStore.storageKey(for: provider) }
 
     private init() {
         // Migration must run BEFORE the first read so a fresh-after-upgrade
-        // launch sees the seeded default instead of an empty list.
+        // launch sees the seeded default instead of an empty list. It only
+        // ever touches Claude's legacy key, matching the default `provider` above.
         MenuBarModuleStore.migrateIfNeeded()
-        let data = UserDefaults.standard.data(forKey: storageKey) ?? Data()
+        let data = UserDefaults.standard.data(forKey: MenuBarModuleStore.storageKey(for: .claudeCode)) ?? Data()
         self.modules = MenuBarModuleStore.decode(data)
     }
 
@@ -41,5 +47,16 @@ final class MenuBarConfig: ObservableObject {
         let deduped = modules.filter { seen.insert($0).inserted }
         guard deduped != self.modules else { return } // skip no-op churn
         self.modules = deduped
+    }
+
+    /// Follow the active provider: reload `modules` from that provider's own
+    /// storage key. Called by `ProviderHub` at launch and from `select(_:)` —
+    /// the strip renders whichever provider is active, so this is the only
+    /// path that should ever change `provider`.
+    func setActive(provider: AIProviderType) {
+        guard provider != self.provider else { return }
+        self.provider = provider
+        let data = UserDefaults.standard.data(forKey: storageKey) ?? Data()
+        modules = MenuBarModuleStore.decode(data)
     }
 }

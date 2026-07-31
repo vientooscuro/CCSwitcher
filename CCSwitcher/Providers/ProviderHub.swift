@@ -48,6 +48,11 @@ final class ProviderHub: ObservableObject {
             available: effective
         )
         installForwarders()
+        // MenuBarConfig.shared defaults to Claude; sync it here too so a
+        // relaunch with, say, Codex persisted as active does not leave the
+        // strip's module list stuck on Claude's until the user switches away
+        // and back.
+        MenuBarConfig.shared.setActive(provider: self.activeProvider)
         log.info("[init] available=\(effective.map(\.rawValue)) active=\(self.activeProvider.rawValue)")
     }
 
@@ -55,6 +60,7 @@ final class ProviderHub: ObservableObject {
         guard provider != activeProvider, surfaces[provider] != nil else { return }
         activeProvider = provider
         UserDefaults.standard.set(provider.rawValue, forKey: Self.persistenceKey)
+        MenuBarConfig.shared.setActive(provider: provider)
         log.info("[select] active=\(provider.rawValue)")
         Task { await surfaces[provider]?.refresh(force: false) }
         startPeriodicRefresh(interval: periodicRefreshInterval)
