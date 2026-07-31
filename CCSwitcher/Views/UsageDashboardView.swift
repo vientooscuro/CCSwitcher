@@ -236,8 +236,7 @@ struct UsageDashboardView: View {
     @ViewBuilder
     private func accountHeader(_ card: UsageCardModel) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: hub.activeProvider.iconName)
-                .font(.subheadline)
+            ProviderIcon(provider: hub.activeProvider, size: 15)
                 .foregroundStyle(card.isActive ? theme.accent : theme.textSecondary)
 
             Text(card.subtitle ?? card.title)

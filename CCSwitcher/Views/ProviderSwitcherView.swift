@@ -11,8 +11,7 @@ struct ProviderSwitcherView: View {
             HStack(spacing: 2) {
                 ForEach(hub.available) { provider in
                     let isSelected = provider == hub.activeProvider
-                    Image(systemName: provider.iconName)
-                        .font(.system(size: 11, weight: .medium))
+                    ProviderIcon(provider: provider, size: 12)
                         .frame(width: 26, height: 22)
                         .foregroundStyle(isSelected ? theme.tabSelectedForeground : theme.textSecondary)
                         .background(

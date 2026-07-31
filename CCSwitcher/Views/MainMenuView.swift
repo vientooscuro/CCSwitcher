@@ -255,8 +255,7 @@ struct MainMenuView: View {
 
     private var headerView: some View {
         HStack(spacing: 10) {
-            Image(systemName: hub.activeProvider.iconName)
-                .font(.title2)
+            ProviderIcon(provider: hub.activeProvider, size: 22)
                 .foregroundStyle(theme.accent)
 
             VStack(alignment: .leading, spacing: 3) {

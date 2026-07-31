@@ -57,8 +57,7 @@ struct AccountSwitcherView: View {
     private func accountRow(_ row: AccountRowModel) -> some View {
         HStack(spacing: 12) {
             // Provider icon
-            Image(systemName: hub.activeProvider.iconName)
-                .font(.title2)
+            ProviderIcon(provider: hub.activeProvider, size: 22)
                 .foregroundStyle(row.isActive ? theme.accent : .secondary)
                 .frame(width: 32, height: 32)
 
