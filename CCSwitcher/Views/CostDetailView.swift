@@ -4,6 +4,8 @@ import SwiftUI
 struct CostDetailView: View {
     @EnvironmentObject private var hub: ProviderHub
     @Environment(\.providerTheme) private var theme
+    @Environment(\.locale) private var locale
+    @State private var isPricingPopoverPresented = false
 
     var body: some View {
         ScrollView {
@@ -28,6 +30,7 @@ struct CostDetailView: View {
                 Text("Today")
                     .font(.caption.weight(.medium))
                     .foregroundStyle(theme.textSecondary)
+                pricingInfoButton
                 Spacer()
                 Text(todayDisplayDate())
                     .font(.caption2)
@@ -182,6 +185,38 @@ struct CostDetailView: View {
         .padding(.horizontal, 8)
         .background(isToday ? theme.cardFillStrong : .clear)
         .clipShape(RoundedRectangle(cornerRadius: 4))
+    }
+
+    // MARK: - Live Pricing
+
+    /// "?" button next to the today card, opening the live per-model rates
+    /// for whichever provider is active. Uses `.popover` rather than `.sheet`
+    /// because a sheet fights the popover's own measured-height contract
+    /// (see `MainMenuView`'s `UsageContentHeightKey` / `ChromeHeightKey`).
+    private var pricingInfoButton: some View {
+        Button {
+            isPricingPopoverPresented.toggle()
+        } label: {
+            Image(systemName: "questionmark.circle")
+                .font(.caption)
+                .foregroundStyle(theme.textSecondary)
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $isPricingPopoverPresented, arrowEdge: .bottom) {
+            PricingRatesPopover(provider: hub.activeProvider, modelSpend: aggregatedModelSpend)
+                .environment(\.providerTheme, theme)
+                .environment(\.locale, locale)
+        }
+    }
+
+    /// model id -> total spend across the whole visible daily series, summed
+    /// from the same `modelBreakdown` the cost cards above already show.
+    private var aggregatedModelSpend: [String: Double] {
+        hub.surface.cost.daily.reduce(into: [String: Double]()) { acc, day in
+            for (model, cost) in day.modelBreakdown {
+                acc[model, default: 0] += cost
+            }
+        }
     }
 
     // MARK: - Pricing Info

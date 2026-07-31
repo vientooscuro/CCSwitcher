@@ -56,4 +56,14 @@ enum Formatters {
     static func currency(_ value: Double) -> String {
         value >= 1 ? String(format: "$%.2f", value) : String(format: "$%.4f", value)
     }
+
+    /// Dollars-per-token → the conventional "dollars per million tokens" figure
+    /// vendors publish rates in (e.g. `$15.00`, `$0.125`). Deliberately separate
+    /// from `currency()`, which is tuned for per-request totals and reads oddly
+    /// at this scale — sub-dollar rates need a third decimal to stay distinct
+    /// (`$0.125` vs `$0.130` would both round to `$0.13`).
+    static func pricePerMillionTokens(_ perToken: Double) -> String {
+        let perMillion = perToken * 1_000_000
+        return perMillion >= 1 ? String(format: "$%.2f", perMillion) : String(format: "$%.3f", perMillion)
+    }
 }
