@@ -112,6 +112,11 @@ targets:
     platform: macOS
     sources:
       - path: CCSwitcherTests
+        excludes:
+          - "Fixtures"
+      - path: CCSwitcherTests/Fixtures
+        type: folder
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.vientooscuro.ccswitcher.tests
