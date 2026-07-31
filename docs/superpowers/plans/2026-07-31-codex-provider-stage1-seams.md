@@ -1492,14 +1492,22 @@ xcodebuild -project CCSwitcher.xcodeproj -scheme CCSwitcher -configuration Debug
 
 Expected: `** BUILD SUCCEEDED **`.
 
-If the compiler rejects `surface.objectWillChange.sink` because the existential's `ObjectWillChangePublisher` is not concrete, constrain it in `ProviderSurface.swift` by adding this associated-type requirement to the protocol:
+**This step requires editing `ProviderSurface.swift`, verified during implementation.** Without a concrete publisher type, `surface.objectWillChange.sink` on an existential fails with:
+
+```
+error: referencing instance method 'sink(receiveValue:)' on 'Publisher' requires the types 'Self.Failure' and 'Never' be equivalent
+```
+
+Constrain the associated type in `CCSwitcher/Providers/ProviderSurface.swift`:
 
 ```swift
 @MainActor
 protocol ProviderSurface: AnyObject, ObservableObject where ObjectWillChangePublisher == ObservableObjectPublisher {
 ```
 
-`AppState` and `CodexState` both use the synthesized `ObservableObjectPublisher`, so this constraint costs nothing.
+That alone then fails with `cannot find type 'ObservableObjectPublisher' in scope`, because `ProviderSurface.swift` only imports `Foundation`. Add `import Combine` to it as well.
+
+`AppState` and `CodexState` both use the synthesized `ObservableObjectPublisher`, so the constraint costs nothing — but confirm `AppState` still conforms after adding it.
 
 - [ ] **Step 3: Commit**
 
