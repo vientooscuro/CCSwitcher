@@ -31,6 +31,11 @@ final class AppState: ObservableObject {
 
     @Published var accountUsageErrors: [UUID: UsageErrorState] = [:]
 
+    /// Account ids that have a usable credential backup. Consumed by the
+    /// Accounts tab so `body` never awaits the Keychain. Refreshed only when the
+    /// set can have changed — never on the periodic poll.
+    @Published var accountsWithBackups: Set<UUID> = []
+
     // MARK: - Services
 
     private let claudeService = ClaudeService.shared
@@ -115,6 +120,7 @@ final class AppState: ObservableObject {
         // unnecessary every 5 minutes.
         Task.detached(priority: .background) { [weak self] in
             await self?.diagnoseTokenHealth()
+            await self?.refreshBackupPresence()
         }
     }
 
@@ -280,6 +286,7 @@ final class AppState: ObservableObject {
 
             accounts.append(account)
             scheduleSave()
+            await refreshBackupPresence()
             log.info("[addAccount] Account saved. Total accounts: \(self.accounts.count)")
         } catch {
             errorMessage = error.localizedDescription
@@ -353,6 +360,7 @@ final class AppState: ObservableObject {
             accounts.append(account)
             activeAccount = account
             scheduleSave()
+            await refreshBackupPresence()
             log.info("[loginNewAccount] Step 6: New account active. Total: \(self.accounts.count)")
 
             isLoggingIn = false
@@ -390,6 +398,7 @@ final class AppState: ObservableObject {
             Task { await switchTo(first) }
         }
         scheduleSave()
+        Task { await refreshBackupPresence() }
         log.info("[removeAccount] Done. Remaining accounts: \(self.accounts.count)")
     }
 
@@ -486,6 +495,7 @@ final class AppState: ObservableObject {
             // block so the account recovers on the next fetch instead of
             // staying stuck behind a stale back-off from the old token.
             clearUsageBlocks(for: account.id)
+            await refreshBackupPresence()
             isLoggingIn = false
             await refresh(knownStatus: status)
             log.info("[reauth] ===== Re-authentication completed =====")
@@ -826,6 +836,14 @@ final class AppState: ObservableObject {
 
     // MARK: - Diagnostics
 
+    /// One Keychain read, refreshed on the events that can change which accounts
+    /// have backups. Kept out of `refresh` on purpose: the periodic cycle must
+    /// not touch the Keychain.
+    private func refreshBackupPresence() async {
+        let ids = await keychain.backedUpAccountIds()
+        accountsWithBackups = Set(ids.compactMap(UUID.init(uuidString:)))
+    }
+
     /// Passive health check — runs once at startup and after login/switch.
     private func diagnoseTokenHealth() async {
         guard !accounts.isEmpty else { return }
@@ -983,6 +1001,7 @@ final class AppState: ObservableObject {
             activeAccount = account
             _ = await claudeService.captureCurrentCredentials(forAccountId: account.id.uuidString, expectedEmail: account.email)
             scheduleSave()
+            await refreshBackupPresence()
             log.info("[updateActiveAccount] Auto-created first account, id=\(account.id)")
         } else {
             log.info("[updateActiveAccount] Logged-in account not in our list (might be new)")

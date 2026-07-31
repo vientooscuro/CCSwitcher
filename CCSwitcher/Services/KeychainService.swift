@@ -189,6 +189,13 @@ actor KeychainService {
         return backup
     }
 
+    /// Ids that currently have a credential backup, from one store read.
+    /// Returns ids only — callers that need a token still ask for it by id, so
+    /// this can be called freely without moving secrets around.
+    func backedUpAccountIds() -> Set<String> {
+        Set(loadBackupStore().keys)
+    }
+
     @discardableResult
     func removeAccountBackup(forAccountId accountId: String) -> Bool {
         log.info("[removeBackup] Removing for accountId=\(accountId)")
