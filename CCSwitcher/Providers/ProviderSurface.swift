@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// What a provider can actually do. Views hide affordances rather than calling
 /// methods that silently no-op — Codex ships read-only in stage 2 and gains
@@ -22,7 +23,7 @@ struct ProviderCapabilities {
 /// Everything the popover asks of a provider. Implemented by `AppState` for
 /// Claude and by `CodexState` for Codex.
 @MainActor
-protocol ProviderSurface: AnyObject, ObservableObject {
+protocol ProviderSurface: AnyObject, ObservableObject where ObjectWillChangePublisher == ObservableObjectPublisher {
     var providerType: AIProviderType { get }
     /// The provider's CLI or config was found on this machine.
     var isAvailable: Bool { get }
