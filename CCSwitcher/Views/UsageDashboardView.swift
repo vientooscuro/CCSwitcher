@@ -22,47 +22,26 @@ private struct StatWithTooltip<Content: View>: View {
 
 /// Shows real usage limits from Claude API, one card per account.
 struct UsageDashboardView: View {
-    @EnvironmentObject private var appState: AppState
-    @AppStorage("showFullEmail") private var showFullEmail = false
+    @EnvironmentObject private var hub: ProviderHub
+    @Environment(\.providerTheme) private var theme
 
     var body: some View {
+        let surface = hub.surface
         ScrollView {
             VStack(spacing: 16) {
-                if appState.accounts.isEmpty && appState.isLoading {
-                    VStack(spacing: 12) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("Loading usage data...")
-                            .font(.caption)
-                            .foregroundStyle(.textSecondary)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 40)
-                } else if appState.accounts.isEmpty {
-                    VStack(spacing: 12) {
-                        Image(systemName: "chart.bar.xaxis")
-                            .font(.system(size: 32))
-                            .foregroundStyle(.textSecondary)
-                        Text("Usage data unavailable")
-                            .font(.subheadline)
-                            .foregroundStyle(.textSecondary)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 40)
+                if surface.accountCards.isEmpty && surface.isLoading {
+                    loadingState
+                } else if surface.accountCards.isEmpty {
+                    emptyState
                 } else {
-                    // Today's cost banner (local parsing, no API needed)
-                    todayCostBanner
-
-                    // Today's activity stats
-                    todayActivityCard
-
-                    ForEach(appState.accounts) { account in
-                        accountUsageCard(account: account, usage: appState.accountUsage[account.id])
+                    todayCostBanner(surface.cost.todayCost)
+                    todayActivityCard(surface.activity)
+                    ForEach(surface.accountCards) { card in
+                        accountUsageCard(card)
                     }
                 }
 
-                // Last updated
-                if let lastRefresh = appState.lastUsageRefresh {
+                if let lastRefresh = surface.lastRefresh {
                     HStack(spacing: 4) {
                         Spacer()
                         Image(systemName: "arrow.clockwise")
@@ -70,7 +49,7 @@ struct UsageDashboardView: View {
                         Text(lastRefresh, style: .relative)
                     }
                     .font(.caption)
-                    .foregroundStyle(.textSecondary)
+                    .foregroundStyle(theme.textSecondary)
                     .padding(.horizontal, 16)
                 }
             }
@@ -82,11 +61,35 @@ struct UsageDashboardView: View {
         }
     }
 
+    private var loadingState: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Loading usage data...")
+                .font(.caption)
+                .foregroundStyle(theme.textSecondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 40)
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "chart.bar.xaxis")
+                .font(.system(size: 32))
+                .foregroundStyle(theme.textSecondary)
+            Text("Usage data unavailable")
+                .font(.subheadline)
+                .foregroundStyle(theme.textSecondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 40)
+    }
+
     // MARK: - Today Cost Banner
 
-    private var todayCostBanner: some View {
-        let cost = appState.costSummary.todayCost
-        return VStack(alignment: .leading, spacing: 10) {
+    private func todayCostBanner(_ cost: Double) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Image(systemName: "dollarsign.circle")
                     .font(.subheadline)
@@ -103,7 +106,7 @@ struct UsageDashboardView: View {
                     .foregroundStyle(.green)
             }
         }
-        .cardStyle()
+        .cardStyle(fill: theme.cardFill, border: theme.cardBorder)
         .sectionPadding()
     }
 
@@ -111,41 +114,37 @@ struct UsageDashboardView: View {
 
     // MARK: - Today Activity Card
 
-    private var todayActivityCard: some View {
-        let stats = appState.activityStats
-        return VStack(alignment: .leading, spacing: 10) {
+    private func todayActivityCard(_ activity: ActivitySummaryModel) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Image(systemName: "waveform.path.ecg")
                     .font(.subheadline)
-                    .foregroundStyle(.brand)
+                    .foregroundStyle(theme.accent)
                 Text("Today's Activity")
                     .font(.subheadline.weight(.medium))
                 Spacer()
             }
 
-            // Top stats row
             HStack(spacing: 0) {
-                activityStat(icon: "bubble.left.and.bubble.right", value: "\(stats.conversationTurns)", label: "Turns",
-                             tooltip: "Messages you sent to Claude Code today")
-                activityStat(icon: "clock", value: stats.activeCodingTimeString, label: "Active",
-                             tooltip: "Estimated total time Claude worked for you today. Parallel sessions stack. Idle gaps >10 min excluded. This is an approximation based on message timestamps, not exact.")
-                activityStat(icon: "doc.text", value: "\(stats.linesWritten)", label: "Lines",
-                             tooltip: "Estimated lines of code written by Claude via Edit/Write tools")
+                activityStat(icon: "bubble.left.and.bubble.right", value: "\(activity.turns)", label: "Turns",
+                             tooltip: "Messages you sent today")
+                activityStat(icon: "clock", value: activity.activeTimeText, label: "Active",
+                             tooltip: "Estimated total time the agent worked for you today. Parallel sessions stack. Idle gaps >10 min excluded. This is an approximation based on message timestamps, not exact.")
+                if let lines = activity.linesWritten {
+                    activityStat(icon: "doc.text", value: "\(lines)", label: "Lines",
+                                 tooltip: "Estimated lines of code written via file-editing tools")
+                }
             }
 
-            // Model usage row — same style as stats above
-            HStack(spacing: 0) {
-                modelStat(name: "Fable", count: stats.modelUsage["Fable"] ?? 0,
-                          tooltip: "Claude Fable 5 — most powerful model, the new flagship tier")
-                modelStat(name: "Opus", count: stats.modelUsage["Opus"] ?? 0,
-                          tooltip: "Claude Opus 4 — most capable model, best for complex tasks")
-                modelStat(name: "Sonnet", count: stats.modelUsage["Sonnet"] ?? 0,
-                          tooltip: "Claude Sonnet 4 — balanced speed and capability")
-                modelStat(name: "Haiku", count: stats.modelUsage["Haiku"] ?? 0,
-                          tooltip: "Claude Haiku 4 — fastest model, best for simple tasks")
+            if !activity.perModel.isEmpty {
+                HStack(spacing: 0) {
+                    ForEach(activity.perModel) { entry in
+                        modelStat(entry)
+                    }
+                }
             }
         }
-        .cardStyle()
+        .cardStyle(fill: theme.cardFill, border: theme.cardBorder)
         .sectionPadding()
     }
 
@@ -157,150 +156,148 @@ struct UsageDashboardView: View {
                 HStack(spacing: 3) {
                     Image(systemName: icon)
                         .font(.caption2)
-                        .foregroundStyle(.textSecondary)
+                        .foregroundStyle(theme.textSecondary)
                     Text(label)
                         .font(.caption2)
-                        .foregroundStyle(.textSecondary)
+                        .foregroundStyle(theme.textSecondary)
                 }
             }
             .frame(maxWidth: .infinity)
         }
     }
 
-    private func modelStat(name: String, count: Int, tooltip: LocalizedStringKey) -> some View {
-        StatWithTooltip(tooltip: tooltip) {
-            VStack(spacing: 3) {
-                Text("\(count)")
-                    .font(.subheadline.weight(.semibold).monospacedDigit())
-                    .foregroundStyle(count > 0 ? .primary : .quaternary)
-                HStack(spacing: 3) {
-                    Circle()
-                        .fill(modelColor(name))
-                        .frame(width: 7, height: 7)
-                    Text(name)
-                        .font(.caption2)
-                        .foregroundStyle(count > 0 ? .tertiary : .quaternary)
-                }
+    private func modelStat(_ entry: ModelUsageEntry) -> some View {
+        VStack(spacing: 3) {
+            Text("\(entry.count)")
+                .font(.subheadline.weight(.semibold).monospacedDigit())
+                .foregroundStyle(entry.count > 0 ? .primary : .quaternary)
+            HStack(spacing: 3) {
+                Circle()
+                    .fill(entry.tint)
+                    .frame(width: 7, height: 7)
+                Text(entry.displayName)
+                    .font(.caption2)
+                    .foregroundStyle(entry.count > 0 ? .tertiary : .quaternary)
             }
-            .frame(maxWidth: .infinity)
         }
-    }
-
-    private func modelColor(_ name: String) -> Color {
-        switch name {
-        case "Fable": return .purple
-        case "Opus": return .brand
-        case "Sonnet": return .blue
-        case "Haiku": return .green
-        default: return .gray
-        }
+        .frame(maxWidth: .infinity)
     }
 
     // MARK: - Per-Account Card
 
-    private func accountUsageCard(account: Account, usage: UsageAPIResponse?) -> some View {
+    private func accountUsageCard(_ card: UsageCardModel) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            accountHeader(account)
-            if let usage = usage {
-                usageBars(usage)
-                extraUsageRow(usage.extraUsage)
-            } else if let errorState = appState.accountUsageErrors[account.id] {
-                HStack {
-                    Image(systemName: errorState.isRateLimited ? "timer" : (errorState.isExpired ? "exclamationmark.triangle" : "xmark.circle"))
-                        .foregroundStyle(errorState.isExpired ? .yellow : .red)
-                    Text(errorState.message)
-                        .font(.caption)
-                        .foregroundStyle(.textSecondary)
-                        .lineLimit(2)
-                    Spacer()
-                }
-                .padding(.top, 4)
+            accountHeader(card)
+
+            if let error = card.error, card.windows.isEmpty {
+                errorRow(error)
+            } else if card.isEmpty {
+                noticeRow(icon: "exclamationmark.triangle", tint: .yellow,
+                          text: Text("No usage data yet — refresh to fetch."))
             } else {
-                HStack {
-                    Image(systemName: "exclamationmark.triangle")
-                        .foregroundStyle(.yellow)
-                    Text("No usage data yet — refresh to fetch.")
-                        .font(.caption)
-                        .foregroundStyle(.textSecondary)
-                    Spacer()
+                ForEach(card.windows) { window in
+                    usageRow(labelView: label(for: window), dotColor: nil,
+                             resetText: UsageWindowFormat.resetText(until: window.resetsAt),
+                             utilization: window.utilization)
                 }
-                .padding(.top, 4)
+                ForEach(card.scopedLimits) { limit in
+                    usageRow(labelView: Text(limit.modelName), dotColor: limit.tint,
+                             resetText: UsageWindowFormat.resetText(until: limit.resetsAt),
+                             utilization: limit.utilization)
+                }
+                if let credits = card.credits {
+                    creditsRow(credits)
+                }
+                if let error = card.error {
+                    errorRow(error)
+                }
+            }
+
+            if let notice = card.notice {
+                noticeRow(icon: "info.circle", tint: .orange, text: Text(notice))
             }
         }
-        .cardStyle(fill: account.isActive ? .cardFill : .cardFill)
+        .cardStyle(fill: card.isActive ? theme.cardFillStrong : theme.cardFill, border: theme.cardBorder)
         .sectionPadding()
     }
 
-    @ViewBuilder
-    private func accountHeader(_ account: Account) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: account.provider.iconName)
-                .font(.subheadline)
-                .foregroundStyle(account.isActive ? .brand : .secondary)
+    private func label(for window: UsageWindowModel) -> Text {
+        switch window.kind {
+        case .session: return Text("Session")
+        case .weekly: return Text("Weekly")
+        case .other(let seconds): return Text(UsageWindowFormat.durationText(seconds: seconds))
+        }
+    }
 
-            Text(account.displayEmail(obfuscated: !showFullEmail))
+    @ViewBuilder
+    private func accountHeader(_ card: UsageCardModel) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: hub.activeProvider.iconName)
+                .font(.subheadline)
+                .foregroundStyle(card.isActive ? theme.accent : theme.textSecondary)
+
+            Text(card.subtitle ?? card.title)
                 .font(.subheadline.weight(.medium))
                 .lineLimit(1)
 
-            if account.isActive {
+            if card.isActive {
                 Badge(text: String(localized: "Active", bundle: L10n.bundle), color: .green)
             }
 
             Spacer()
 
-            if let sub = account.displaySubscriptionType {
-                Badge(text: sub, color: .brand)
+            if let plan = card.planBadge {
+                Badge(text: plan, color: theme.accent)
             }
         }
     }
 
     @ViewBuilder
-    private func usageBars(_ usage: UsageAPIResponse) -> some View {
-        if let session = usage.fiveHour {
-            usageRow(label: "Session", resetText: session.resetTimeString, utilization: session.utilization ?? 0)
-        }
-        if let weekly = usage.sevenDay {
-            usageRow(label: "Weekly", resetText: weekly.resetTimeString, utilization: weekly.utilization ?? 0)
-        }
-        // Model-scoped limits (e.g. a separate Fable 5 weekly limit) — only
-        // present when the subscription actually carries them.
-        ForEach(usage.scopedModelLimits) { limit in
-            usageRow(labelText: limit.modelName, dotColor: modelColor(limit.modelName),
-                     resetText: limit.resetTime, utilization: limit.utilization)
+    private func creditsRow(_ credits: CreditPoolModel) -> some View {
+        let tint: Color = credits.isEnabled ? .orange : .gray
+        HStack(spacing: 6) {
+            Image(systemName: credits.isEnabled ? "bolt.fill" : "bolt.slash")
+                .font(.caption)
+                .foregroundStyle(tint)
+            Text("Extra usage")
+                .font(.caption)
+                .foregroundStyle(theme.textSecondary)
+            Spacer()
+            if credits.isUnlimited {
+                Text("Unlimited")
+                    .font(.caption)
+                    .foregroundStyle(tint)
+            } else if let balance = credits.balanceText {
+                Text(balance)
+                    .font(.caption)
+                    .foregroundStyle(tint)
+            } else {
+                Text(LocalizedStringKey(credits.isEnabled ? "On" : "Off"))
+                    .font(.caption)
+                    .foregroundStyle(tint)
+            }
         }
     }
 
-    @ViewBuilder
-    private func extraUsageRow(_ extra: ExtraUsage?) -> some View {
-        if let extra {
-            let enabled = extra.isEnabled == true
-            let iconColor: Color = enabled ? .orange : .gray
-            let statusColor: Color = enabled ? .orange : .gray
-            HStack(spacing: 6) {
-                Image(systemName: enabled ? "bolt.fill" : "bolt.slash")
-                    .font(.caption)
-                    .foregroundStyle(iconColor)
-                Text("Extra usage")
-                    .font(.caption)
-                    .foregroundStyle(.textSecondary)
-                Spacer()
-                Text(LocalizedStringKey(enabled ? "On" : "Off"))
-                    .font(.caption)
-                    .foregroundStyle(statusColor)
-            }
+    private func errorRow(_ error: ProviderErrorModel) -> some View {
+        let icon = error.isRateLimited ? "timer" : (error.needsReauth ? "exclamationmark.triangle" : "xmark.circle")
+        return noticeRow(icon: icon, tint: error.needsReauth ? .yellow : .red, text: Text(error.message))
+    }
+
+    private func noticeRow(icon: String, tint: Color, text: Text) -> some View {
+        HStack {
+            Image(systemName: icon)
+                .foregroundStyle(tint)
+            text
+                .font(.caption)
+                .foregroundStyle(theme.textSecondary)
+                .lineLimit(2)
+            Spacer()
         }
+        .padding(.top, 4)
     }
 
     // MARK: - Usage Row
-
-    private func usageRow(label: LocalizedStringKey, resetText: String?, utilization: Double) -> some View {
-        usageRow(labelView: Text(label), dotColor: nil, resetText: resetText, utilization: utilization)
-    }
-
-    /// Verbatim-label variant for dynamic, non-localizable labels (model names).
-    private func usageRow(labelText: String, dotColor: Color?, resetText: String?, utilization: Double) -> some View {
-        usageRow(labelView: Text(labelText), dotColor: dotColor, resetText: resetText, utilization: utilization)
-    }
 
     private func usageRow(labelView: Text, dotColor: Color?, resetText: String?, utilization: Double) -> some View {
         VStack(spacing: 5) {
@@ -312,12 +309,12 @@ struct UsageDashboardView: View {
                 }
                 labelView
                     .font(.caption)
-                    .foregroundStyle(.textSecondary)
+                    .foregroundStyle(theme.textSecondary)
                 Spacer()
                 if let resetText {
                     Text("Resets in \(resetText)")
                         .font(.caption)
-                        .foregroundStyle(.textSecondary)
+                        .foregroundStyle(theme.textSecondary)
                 }
             }
 
@@ -325,11 +322,11 @@ struct UsageDashboardView: View {
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
                         RoundedRectangle(cornerRadius: 3)
-                            .fill(.progressTrack)
+                            .fill(theme.progressTrack)
                             .frame(height: 7)
 
                         RoundedRectangle(cornerRadius: 3)
-                            .fill(colorForUtilization(utilization))
+                            .fill(theme.utilizationColor(utilization))
                             .frame(width: max(0, geo.size.width * min(utilization / 100.0, 1.0)), height: 7)
                     }
                 }
@@ -337,15 +334,9 @@ struct UsageDashboardView: View {
 
                 Text("\(Int(utilization))%")
                     .font(.caption.weight(.medium).monospacedDigit())
-                    .foregroundStyle(colorForUtilization(utilization))
+                    .foregroundStyle(theme.utilizationColor(utilization))
                     .frame(width: 34, alignment: .trailing)
             }
         }
-    }
-
-    private func colorForUtilization(_ pct: Double) -> Color {
-        if pct >= 90 { return .red }
-        if pct >= 60 { return .orange }
-        return .green
     }
 }
