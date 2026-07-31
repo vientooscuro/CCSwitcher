@@ -20,7 +20,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct CCSwitcherApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @StateObject private var appState = AppState()
+    @StateObject private var appState: AppState
+    @StateObject private var providerHub: ProviderHub
     @StateObject private var updateChecker = UpdateChecker()
     @StateObject private var menuBarConfig = MenuBarConfig.shared
     @AppStorage("refreshInterval") private var refreshInterval: Double = 300
@@ -28,6 +29,22 @@ struct CCSwitcherApp: App {
 
     @State private var statusItemController = StatusItemController()
     @State private var didBootstrap = false
+
+    init() {
+        let state = AppState()
+        let available = ProviderRegistry.detect(
+            claudeInstalled: true,   // corrected asynchronously via AppState.claudeAvailable
+            fileExists: { FileManager.default.fileExists(atPath: $0) }
+        )
+        _appState = StateObject(wrappedValue: state)
+        // Stage 1 has no CodexState surface yet, so filter Codex out here even if
+        // detected — registering it would give the hub a segment with nothing
+        // behind it. Stage 2 removes this filter once CodexState exists.
+        _providerHub = StateObject(wrappedValue: ProviderHub(
+            surfaces: [.claudeCode: state],
+            available: available.filter { $0 == .claudeCode }
+        ))
+    }
 
     /// CCSwitcherTests is a hosted test bundle, so `xcodebuild test` launches this
     /// real app process. Skip bootstrap there — otherwise every test run forks the
@@ -50,6 +67,7 @@ struct CCSwitcherApp: App {
                     _ = updateChecker
                     statusItemController.install(
                         appState: appState,
+                        hub: providerHub,
                         config: menuBarConfig,
                         locale: currentLocale
                     )
@@ -69,6 +87,7 @@ struct CCSwitcherApp: App {
         Settings {
             SettingsView()
                 .environmentObject(appState)
+                .environmentObject(providerHub)
                 .environmentObject(updateChecker)
                 .environmentObject(menuBarConfig)
                 .environment(\.locale, currentLocale)

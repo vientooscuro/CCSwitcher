@@ -15,13 +15,15 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private var stripController: NSHostingController<AnyView>?
     private var popoverController: NSHostingController<AnyView>?
     private var appState: AppState?
+    private var providerHub: ProviderHub?
     private var menuBarConfig: MenuBarConfig?
     private var installed = false
 
-    func install(appState: AppState, config: MenuBarConfig, locale: Locale) {
+    func install(appState: AppState, hub: ProviderHub, config: MenuBarConfig, locale: Locale) {
         guard !installed else { return }
         installed = true
         self.appState = appState
+        self.providerHub = hub
         self.menuBarConfig = config
 
         let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -73,6 +75,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             rootView: AnyView(
                 MainMenuView()
                     .environmentObject(appState)
+                    .environmentObject(hub)
                     .environment(\.locale, locale)
             )
         )
@@ -90,7 +93,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// Update the locale environment on all hosted SwiftUI views.
     /// Called when the user changes the in-app language setting.
     func updateLocale(_ locale: Locale) {
-        guard let appState, let config = menuBarConfig else { return }
+        guard let appState, let providerHub, let config = menuBarConfig else { return }
         stripController?.rootView = AnyView(
             MenuBarStripView(
                 appState: appState,
@@ -104,6 +107,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         popoverController?.rootView = AnyView(
             MainMenuView()
                 .environmentObject(appState)
+                .environmentObject(providerHub)
                 .environment(\.locale, locale)
         )
     }
