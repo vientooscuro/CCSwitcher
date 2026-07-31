@@ -2,7 +2,8 @@ import SwiftUI
 
 /// Full cost breakdown tab with today's card and daily history.
 struct CostDetailView: View {
-    @EnvironmentObject private var appState: AppState
+    @EnvironmentObject private var hub: ProviderHub
+    @Environment(\.providerTheme) private var theme
 
     var body: some View {
         ScrollView {
@@ -19,18 +20,18 @@ struct CostDetailView: View {
     // MARK: - Summary Cards
 
     private var todayCard: some View {
-        let summary = appState.costSummary
-        let today = summary.dailyCosts.first(where: { $0.date == todayString() })
+        let summary = hub.surface.cost
+        let today = summary.daily.first(where: { $0.date == todayString() })
 
         return VStack(spacing: 8) {
             HStack {
                 Text("Today")
                     .font(.caption.weight(.medium))
-                    .foregroundStyle(.textSecondary)
+                    .foregroundStyle(theme.textSecondary)
                 Spacer()
                 Text(todayDisplayDate())
                     .font(.caption2)
-                    .foregroundStyle(.textSecondary)
+                    .foregroundStyle(theme.textSecondary)
             }
 
             Text(formatCost(summary.todayCost))
@@ -45,33 +46,30 @@ struct CostDetailView: View {
                         HStack {
                             Text(model)
                                 .font(.caption2)
-                                .foregroundStyle(.textSecondary)
+                                .foregroundStyle(theme.textSecondary)
                             Spacer()
                             Text(formatCost(cost))
                                 .font(.caption2.weight(.medium).monospacedDigit())
-                                .foregroundStyle(.textSecondary)
+                                .foregroundStyle(theme.textSecondary)
                         }
                     }
                 }
 
                 HStack {
-                    Label("\(today.sessionCount) sessions", systemImage: "terminal")
-                        .font(.caption2)
-                        .foregroundStyle(.textSecondary)
                     Spacer()
                     Text("\(formatTokenCount(today.totalTokens)) tokens")
                         .font(.caption2)
-                        .foregroundStyle(.textSecondary)
+                        .foregroundStyle(theme.textSecondary)
                 }
                 .padding(.top, 2)
             }
         }
-        .cardStyle()
+        .cardStyle(fill: theme.cardFill, border: theme.cardBorder)
         .sectionPadding()
     }
 
     private var periodSummaryCards: some View {
-        let costs = appState.costSummary.dailyCosts
+        let costs = hub.surface.cost.daily
         let todayStr = todayString()
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
@@ -90,37 +88,37 @@ struct CostDetailView: View {
         VStack(spacing: 4) {
             Text(title)
                 .font(.caption2)
-                .foregroundStyle(.textSecondary)
+                .foregroundStyle(theme.textSecondary)
             Text(formatCost(cost))
                 .font(.title3.weight(.semibold).monospacedDigit())
                 .foregroundStyle(.primary)
         }
         .frame(maxWidth: .infinity)
-        .cardStyle()
+        .cardStyle(fill: theme.cardFill, border: theme.cardBorder)
     }
 
-    private func costForLastDays(_ days: Int, costs: [DailyCost], today: String, formatter: DateFormatter) -> Double {
+    private func costForLastDays(_ days: Int, costs: [DailyCostEntry], today: String, formatter: DateFormatter) -> Double {
         guard let todayDate = formatter.date(from: today) else { return 0 }
         let startDate = Calendar.current.date(byAdding: .day, value: -(days - 1), to: todayDate)!
         let startStr = formatter.string(from: startDate)
-        return costs.filter { $0.date >= startStr && $0.date <= today }.reduce(0) { $0 + $1.totalCost }
+        return costs.filter { $0.date >= startStr && $0.date <= today }.reduce(0) { $0 + $1.cost }
     }
 
     // MARK: - Daily History
 
     private var dailyHistorySection: some View {
-        let costs = appState.costSummary.dailyCosts
-        let maxCost = costs.map(\.totalCost).max() ?? 1
+        let costs = hub.surface.cost.daily
+        let maxCost = costs.map(\.cost).max() ?? 1
 
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Daily History")
                     .font(.caption.weight(.medium))
-                    .foregroundStyle(.textSecondary)
+                    .foregroundStyle(theme.textSecondary)
                 Spacer()
-                Text("Total: \(formatCost(appState.costSummary.totalCost))")
+                Text("Total: \(formatCost(hub.surface.cost.totalCost))")
                     .font(.caption2.weight(.medium).monospacedDigit())
-                    .foregroundStyle(.textSecondary)
+                    .foregroundStyle(theme.textSecondary)
             }
             .padding(.horizontal, 16)
 
@@ -128,10 +126,10 @@ struct CostDetailView: View {
                 VStack(spacing: 12) {
                     Image(systemName: "dollarsign.circle")
                         .font(.system(size: 32))
-                        .foregroundStyle(.textSecondary)
+                        .foregroundStyle(theme.textSecondary)
                     Text("No cost data available")
                         .font(.subheadline)
-                        .foregroundStyle(.textSecondary)
+                        .foregroundStyle(theme.textSecondary)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 24)
@@ -146,24 +144,24 @@ struct CostDetailView: View {
         }
     }
 
-    private func dailyRow(day: DailyCost, maxCost: Double) -> some View {
+    private func dailyRow(day: DailyCostEntry, maxCost: Double) -> some View {
         let isToday = day.date == todayString()
-        let barRatio = maxCost > 0 ? day.totalCost / maxCost : 0
+        let barRatio = maxCost > 0 ? day.cost / maxCost : 0
 
         return HStack(spacing: 8) {
             Text(shortDate(day.date))
                 .font(.caption2.monospacedDigit())
-                .foregroundStyle(isToday ? .brand : .secondary)
+                .foregroundStyle(isToday ? theme.accent : .secondary)
                 .frame(width: 40, alignment: .leading)
 
-            Text(formatCost(day.totalCost))
+            Text(formatCost(day.cost))
                 .font(.caption2.weight(.medium).monospacedDigit())
-                .foregroundStyle(isToday ? .brand : .primary)
+                .foregroundStyle(isToday ? theme.accent : .primary)
                 .frame(width: 56, alignment: .trailing)
 
             GeometryReader { geo in
                 RoundedRectangle(cornerRadius: 2)
-                    .fill(isToday ? Color.brand : Color.blue.opacity(0.6))
+                    .fill(isToday ? theme.accent : Color.blue.opacity(0.6))
                     .frame(width: max(2, geo.size.width * barRatio), height: 8)
             }
             .frame(height: 8)
@@ -171,13 +169,13 @@ struct CostDetailView: View {
             // Compact model breakdown
             Text(day.modelBreakdown.keys.sorted().joined(separator: ", "))
                 .font(.system(size: 8))
-                .foregroundStyle(.textSecondary)
+                .foregroundStyle(theme.textSecondary)
                 .frame(width: 50, alignment: .trailing)
                 .lineLimit(1)
         }
         .padding(.vertical, 4)
         .padding(.horizontal, 8)
-        .background(isToday ? .cardFillStrong : .clear)
+        .background(isToday ? theme.cardFillStrong : .clear)
         .clipShape(RoundedRectangle(cornerRadius: 4))
     }
 
@@ -188,7 +186,7 @@ struct CostDetailView: View {
             HStack {
                 Text("How We Calculate")
                     .font(.caption.weight(.medium))
-                    .foregroundStyle(.textSecondary)
+                    .foregroundStyle(theme.textSecondary)
                 Spacer()
             }
             .padding(.horizontal, 16)
@@ -196,7 +194,7 @@ struct CostDetailView: View {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Cost is computed from your local Claude Code session logs (jsonl files) under ~/.claude/projects/.")
                     .font(.caption2)
-                    .foregroundStyle(.textSecondary)
+                    .foregroundStyle(theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
 
                 if let v = VerifiedAgainst.load() {
@@ -206,12 +204,12 @@ struct CostDetailView: View {
                             .foregroundStyle(.green)
                         Text("Verified against ccusage \(v.ccusageVersion) on \(v.verifiedOn) — \(v.windowDays)-day total matched to the cent.")
                             .font(.caption2)
-                            .foregroundStyle(.textSecondary)
+                            .foregroundStyle(theme.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
-            .cardStyle()
+            .cardStyle(fill: theme.cardFill, border: theme.cardBorder)
             .sectionPadding()
         }
     }
