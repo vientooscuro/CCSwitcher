@@ -1,0 +1,15 @@
+{"timestamp":"2026-07-30T10:00:00.000Z","type":"session_meta","payload":{"session_id":"s1","id":"r1","cwd":"/tmp","originator":"codex_cli_rs","cli_version":"0.145.0","model_provider":"openai"}}
+{"timestamp":"2026-07-30T10:00:01.000Z","type":"turn_context","payload":{"turn_id":"t1","model":"gpt-5.6-sol","cwd":"/tmp","effort":"high"}}
+{"timestamp":"2026-07-30T10:00:02.000Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-07-30T10:00:03.000Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"primary":{"used_percent":1.0,"window_minutes":300,"resets_at":1785000000}}}}
+{"timestamp":"2026-07-30T10:00:04.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":800,"cache_write_input_tokens":0,"output_tokens":100,"reasoning_output_tokens":40,"total_tokens":1100},"model_context_window":258400}}}
+{"timestamp":"2026-07-30T10:05:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":3000,"cached_input_tokens":2500,"cache_write_input_tokens":0,"output_tokens":300,"reasoning_output_tokens":90,"total_tokens":3300},"model_context_window":258400}}}
+{"timestamp":"2026-07-30T10:06:00.000Z","type":"custom_tool_call","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"c1","input":"*** Begin Patch\n*** Update File: /tmp/a.swift\n@@\n-let old = 1\n+let new = 1\n+let extra = 2\n*** End Patch"}}
+{"timestamp":"2026-07-30T10:07:00.000Z","type":"turn_context","payload":{"turn_id":"t2","model":"gpt-5.6-luna","cwd":"/tmp","effort":"low"}}
+{"timestamp":"2026-07-30T10:07:01.000Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-07-30T10:07:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":4000,"cached_input_tokens":3000,"cache_write_input_tokens":0,"output_tokens":400,"reasoning_output_tokens":100,"total_tokens":4400},"model_context_window":258400}}}
+{"timestamp":"2026-07-30T10:08:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0,"total_tokens":15},"model_context_window":258400}}}
+{"timestamp":"2026-07-31T09:00:00.000Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-07-31T09:00:01.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":60,"cached_input_tokens":10,"cache_write_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":5,"total_tokens":80},"model_context_window":258400},"rate_limits":{"primary":{"used_percent":65.0,"window_minutes":10080,"resets_at":1786033302},"secondary":null,"plan_type":"prolite","credits":{"has_credits":false,"unlimited":false,"balance":"0"}}}}
+not valid json at all
+{"timestamp":"2026-07-31T09:01:00.000Z","type":"event_msg","payload":{"type":"agent_message","message":"done"}}
