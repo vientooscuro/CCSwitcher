@@ -1076,53 +1076,52 @@ git commit -m "Add tested Claude to display model mapping"
 
 - [ ] **Step 1: Expose which accounts have stored credentials**
 
-`AccountRowModel.hasStoredCredentials` needs the Keychain answer, and the view must not await inside `body`. `AppState` already reads backups during `diagnoseTokenHealth`; cache that result.
+`AccountRowModel.hasStoredCredentials` needs a Keychain answer, and a SwiftUI `body` cannot await, so `AppState` has to cache it.
 
-In `CCSwitcher/AppState.swift`, add after the `@Published var accountUsageErrors` declaration (around line 32):
+**Do not compute this inside `diagnoseTokenHealth`, and do not call that diagnostic from `refresh`.** The comment at `AppState.init` records that the health check deliberately runs once at startup because it "used to run on every refresh — totally unnecessary every 5 minutes". Wiring it into the refresh cycle would reintroduce precisely the regression that comment describes, and it costs one Keychain read per account every five minutes. Read the backup store once instead, and only when its contents can actually have changed.
+
+First expose the ids. In `CCSwitcher/Services/KeychainService.swift`, add next to `getAccountBackup(forAccountId:)`:
 
 ```swift
-    /// Account ids that have a usable credential backup. Refreshed by
-    /// `diagnoseTokenHealth`; consumed by the Accounts tab so `body` never
-    /// awaits the Keychain.
+    /// Ids that currently have a credential backup, from one store read.
+    /// Returns ids only — callers that need a token still ask for it by id, so
+    /// this can be called freely without moving secrets around.
+    func backedUpAccountIds() -> Set<String> {
+        Set(loadBackupStore().keys)
+    }
+```
+
+Then in `CCSwitcher/AppState.swift`, add after the `@Published var accountUsageErrors` declaration (around line 32):
+
+```swift
+    /// Account ids that have a usable credential backup. Consumed by the
+    /// Accounts tab so `body` never awaits the Keychain. Refreshed only when the
+    /// set can have changed — never on the periodic poll.
     @Published var accountsWithBackups: Set<UUID> = []
 ```
 
-In `diagnoseTokenHealth()`, replace the account loop body so it records the result. The existing loop is:
+and add this alongside `diagnoseTokenHealth` in the `// MARK: - Diagnostics` section:
 
 ```swift
-        for account in accounts {
-            if let backup = await keychain.getAccountBackup(forAccountId: account.id.uuidString) {
-                let backupEmail = (backup.oauthAccount["emailAddress"]?.value as? String) ?? "?"
-                log.info("[diagnose] Backup [\(account.email)]: OK (email=\(backupEmail))")
-            } else {
-                log.warning("[diagnose] Backup [\(account.email)]: MISSING — switch will fail")
-            }
-        }
+    /// One Keychain read, refreshed on the events that can change which accounts
+    /// have backups. Kept out of `refresh` on purpose: the periodic cycle must
+    /// not touch the Keychain.
+    private func refreshBackupPresence() async {
+        let ids = await keychain.backedUpAccountIds()
+        accountsWithBackups = Set(ids.compactMap(UUID.init(uuidString:)))
+    }
 ```
 
-Replace with:
+Call it from exactly these six places, each of which adds or removes a backup:
 
-```swift
-        var withBackups: Set<UUID> = []
-        for account in accounts {
-            if let backup = await keychain.getAccountBackup(forAccountId: account.id.uuidString) {
-                let backupEmail = (backup.oauthAccount["emailAddress"]?.value as? String) ?? "?"
-                log.info("[diagnose] Backup [\(account.email)]: OK (email=\(backupEmail))")
-                withBackups.insert(account.id)
-            } else {
-                log.warning("[diagnose] Backup [\(account.email)]: MISSING — switch will fail")
-            }
-        }
-        accountsWithBackups = withBackups
-```
+1. In `init`, inside the existing `Task.detached` block, after `diagnoseTokenHealth()`: `await self?.refreshBackupPresence()`
+2. At the end of `addAccount()`, on the success path after `scheduleSave()`.
+3. At the end of `loginNewAccount()`, after the `scheduleSave()` that follows appending the new account.
+4. In `removeAccount(_:)`, after `scheduleSave()`. That method is not `async`, so wrap it: `Task { await refreshBackupPresence() }`.
+5. At the end of `reauthenticateAccount(_:)`, after `clearUsageBlocks(for:)`.
+6. In `updateActiveAccount(from:)`, in the `accounts.isEmpty` branch that auto-creates the first account and calls `captureCurrentCredentials`, after `scheduleSave()`.
 
-`diagnoseTokenHealth` is already `private func` on the `@MainActor` class and is called from a detached task with `await`, so assigning a `@Published` property inside it is correct.
-
-Then, at the end of `refresh(knownStatus:force:)`, just before `isLoading = false`, add a re-check so newly added accounts appear as switchable without an app restart:
-
-```swift
-        await diagnoseTokenHealth()
-```
+Do **not** add it to `switchTo(_:)`. Switching moves credentials between the live slot and existing backups without creating or destroying any, so the set is unchanged and a read there would be waste.
 
 - [ ] **Step 2: Create the conformance**
 
@@ -2244,7 +2243,9 @@ git commit -m "Verify provider seams preserve existing behaviour"
 
 **Type consistency.** Checked across tasks: `UsageWindowModel.Kind(windowSeconds:)` is an initializer everywhere (Tasks 2, 5, 13), not a static `classify`. `ScopedLimitModel.tint` is used in Tasks 3, 5 and 10. `CostSeriesModel.daily` (not `dailyCosts`) and `DailyCostEntry.cost` (not `totalCost`) are used consistently in Tasks 3, 5 and 11. `ProviderErrorModel.needsReauth` (not `isExpired`) appears in Tasks 3, 5, 6 and 10. `ProviderSurface.isAuthenticating` (not `isLoggingIn`) appears in Tasks 4, 6 and 12. `UsageWindowFormat.resetText` / `compactResetText` / `durationText` are used with those exact names in Tasks 2, 10 and 13. `hub.surface` is the access path everywhere, and `hub.refreshActive(force:)` matches Task 8's definition.
 
-**One deviation worth flagging.** Task 6 adds a stored property and two lines to `AppState`, which the spec described as untouched. It is needed because `AccountRowModel.hasStoredCredentials` requires a Keychain read that a SwiftUI `body` cannot await. The change adds no logic to the credential paths — it records a value that `diagnoseTokenHealth` already computes and logs.
+**One deviation worth flagging.** Task 6 adds a stored property, a small private method, and six one-line call sites to `AppState`, plus one method to `KeychainService` — where the spec described `AppState` as untouched. It is needed because `AccountRowModel.hasStoredCredentials` requires a Keychain read that a SwiftUI `body` cannot await. No logic is added to the credential paths themselves.
+
+The obvious cheaper-looking route — folding this into `diagnoseTokenHealth` and calling that from `refresh` — is explicitly rejected in Task 6, because `AppState.init` documents that the diagnostic was moved out of the refresh cycle for being "totally unnecessary every 5 minutes". Restoring it would undo a deliberate performance fix and add one Keychain read per account per poll.
 
 ---
 
