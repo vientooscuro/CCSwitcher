@@ -1248,7 +1248,7 @@ Create `CCSwitcherTests/Fixtures/codex-rollout.jsonl`. It deliberately exercises
 {"timestamp":"2026-07-30T10:00:03.000Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"primary":{"used_percent":1.0,"window_minutes":300,"resets_at":1785000000}}}}
 {"timestamp":"2026-07-30T10:00:04.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":800,"cache_write_input_tokens":0,"output_tokens":100,"reasoning_output_tokens":40,"total_tokens":1100},"model_context_window":258400}}}
 {"timestamp":"2026-07-30T10:05:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":3000,"cached_input_tokens":2500,"cache_write_input_tokens":0,"output_tokens":300,"reasoning_output_tokens":90,"total_tokens":3300},"model_context_window":258400}}}
-{"timestamp":"2026-07-30T10:06:00.000Z","type":"custom_tool_call","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"c1","input":"*** Begin Patch\n*** Update File: /tmp/a.swift\n@@\n-let old = 1\n+let new = 1\n+let extra = 2\n*** End Patch"}}
+{"timestamp":"2026-07-30T10:06:00.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"c1","input":"*** Begin Patch\n*** Update File: /tmp/a.swift\n@@\n-let old = 1\n+let new = 1\n+let extra = 2\n*** End Patch"}}
 {"timestamp":"2026-07-30T10:07:00.000Z","type":"turn_context","payload":{"turn_id":"t2","model":"gpt-5.6-luna","cwd":"/tmp","effort":"low"}}
 {"timestamp":"2026-07-30T10:07:01.000Z","type":"event_msg","payload":{"type":"task_started"}}
 {"timestamp":"2026-07-30T10:07:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":4000,"cached_input_tokens":3000,"cache_write_input_tokens":0,"output_tokens":400,"reasoning_output_tokens":100,"total_tokens":4400},"model_context_window":258400}}}
@@ -1517,8 +1517,14 @@ enum CodexRolloutParser {
                     break
                 }
 
-            case "custom_tool_call":
+            // Tool calls are wrapped: the envelope's `type` is `response_item`
+            // and the tool kind lives in `payload.type`. Matching
+            // `custom_tool_call` at the envelope level silently never fires --
+            // verified against real files, where it produced `linesWritten: 0`
+            // while a fixture encoding the wrong shape stayed green.
+            case "response_item":
                 guard let payload,
+                      payload["type"] as? String == "custom_tool_call",
                       payload["name"] as? String == "apply_patch",
                       let input = payload["input"] as? String,
                       let timestamp else { break }
@@ -1696,7 +1702,9 @@ actor CodexSessionCache {
         var files: [String: CodexRolloutAggregate]
     }
 
-    private static let currentVersion = 1
+    /// Bump whenever the parser's output changes meaning, so cached aggregates
+    /// computed by the old logic are discarded rather than trusted.
+    private static let currentVersion = 2
 
     private var files: [String: CodexRolloutAggregate] = [:]
     private var loaded = false

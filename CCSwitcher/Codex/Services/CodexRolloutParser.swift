@@ -82,8 +82,14 @@ enum CodexRolloutParser {
                     break
                 }
 
-            case "custom_tool_call":
+            // Tool calls are wrapped: the envelope's `type` is `response_item`
+            // and the tool kind lives in `payload.type`. Matching
+            // `custom_tool_call` at the envelope level silently never fires,
+            // which is exactly how this shipped as `linesWritten: 0` on real
+            // data while a fixture that encoded the wrong shape stayed green.
+            case "response_item":
                 guard let payload,
+                      payload["type"] as? String == "custom_tool_call",
                       payload["name"] as? String == "apply_patch",
                       let input = payload["input"] as? String,
                       let timestamp else { break }

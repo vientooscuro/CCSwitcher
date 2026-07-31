@@ -17,7 +17,11 @@ actor CodexSessionCache {
         var files: [String: CodexRolloutAggregate]
     }
 
-    private static let currentVersion = 1
+    /// Bump whenever the parser's output changes meaning, so cached aggregates
+    /// computed by the old logic are discarded rather than trusted. v2: the
+    /// parser was matching `custom_tool_call` on the event envelope instead of
+    /// inside `payload`, so every cached `linesAdded` was zero.
+    private static let currentVersion = 2
 
     private var files: [String: CodexRolloutAggregate] = [:]
     private var loaded = false
