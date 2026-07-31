@@ -69,6 +69,12 @@ struct MenuBarModuleView: View {
             window(.session).map(MenuBarModule.compactLabel(for:)) ?? module.compactLabel
         case .weeklyBar, .weeklyBarPlain:
             window(.weekly).map(MenuBarModule.compactLabel(for:)) ?? module.compactLabel
+        // The countdown modules carry the same window label plus a reset glyph,
+        // so they would mislabel a Codex window exactly as the bars did.
+        case .sessionReset:
+            window(.session).map { MenuBarModule.compactLabel(for: $0) + "↻" } ?? module.compactLabel
+        case .weeklyReset:
+            window(.weekly).map { MenuBarModule.compactLabel(for: $0) + "↻" } ?? module.compactLabel
         default:
             module.compactLabel
         }
