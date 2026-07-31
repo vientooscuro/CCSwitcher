@@ -75,6 +75,15 @@ struct CCSwitcherApp: App {
                     Task {
                         await appState.refresh()
                         appState.startAutoRefresh(interval: refreshInterval)
+                        // Claude is refreshed unconditionally above because the
+                        // widget and its auto-refresh timer depend on it. The
+                        // active provider also needs a first load, or launching
+                        // with Codex selected shows an empty popover until the
+                        // user hits refresh. Skipped when Claude is active, so
+                        // it never double-fetches.
+                        if providerHub.activeProvider != .claudeCode {
+                            await providerHub.refreshActive(force: false)
+                        }
                     }
                 }
                 .onChange(of: appLanguage) { _, _ in
