@@ -29,13 +29,20 @@ struct CCSwitcherApp: App {
     @State private var statusItemController = StatusItemController()
     @State private var didBootstrap = false
 
+    /// CCSwitcherTests is a hosted test bundle, so `xcodebuild test` launches this
+    /// real app process. Skip bootstrap there — otherwise every test run forks the
+    /// `claude` CLI and hits the live usage endpoint, burning rate-limit budget.
+    private var isRunningUnitTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    }
+
     var body: some Scene {
         // Hidden 1×1 window to keep SwiftUI's lifecycle alive so `Settings` scene
         // shows the native toolbar tabs even though the UI is AppKit-based.
         WindowGroup("CCSwitcherKeepalive") {
             HiddenWindowView()
                 .onAppear {
-                    guard !didBootstrap else { return }
+                    guard !didBootstrap, !isRunningUnitTests else { return }
                     didBootstrap = true
                     // Sparkle's SPUStandardUpdaterController(startingUpdater: true)
                     // schedules its own background update checks; no need to

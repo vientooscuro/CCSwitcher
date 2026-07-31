@@ -116,11 +116,6 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.vientooscuro.ccswitcher.tests
         GENERATE_INFOPLIST_FILE: true
-        SWIFT_VERSION: "6.0"
-        MACOSX_DEPLOYMENT_TARGET: "14.0"
-        CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: XTPJK8U436
-        SWIFT_STRICT_CONCURRENCY: targeted
     dependencies:
       - target: CCSwitcher
 
