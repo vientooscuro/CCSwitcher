@@ -14,10 +14,14 @@ enum MenuBarModule: String, Codable, CaseIterable, Identifiable {
     case dailyCost
     case sessionReset
     case weeklyReset
+    case scopedLimitBar
 
     var id: String { rawValue }
 
-    /// Short uppercase label shown on the top line of the module.
+    /// Short uppercase label shown on the top line of the module. This is the
+    /// static fallback used when no window data is available yet; once a
+    /// window is loaded, `compactLabel(for:)` below derives the real label
+    /// from its length instead — Claude's "5H"/"7D" are not universal truths.
     var compactLabel: String {
         switch self {
         case .account:         return "@"
@@ -28,6 +32,7 @@ enum MenuBarModule: String, Codable, CaseIterable, Identifiable {
         case .dailyCost:       return "TODAY"
         case .sessionReset:    return "5H↻"
         case .weeklyReset:     return "7D↻"
+        case .scopedLimitBar:  return "MDL"
         }
     }
 
@@ -42,7 +47,20 @@ enum MenuBarModule: String, Codable, CaseIterable, Identifiable {
         case .dailyCost:       return String(localized: "Daily cost", bundle: L10n.bundle)
         case .sessionReset:    return String(localized: "Session reset countdown", bundle: L10n.bundle)
         case .weeklyReset:     return String(localized: "Weekly reset countdown", bundle: L10n.bundle)
+        case .scopedLimitBar:  return String(localized: "Model-scoped limit", bundle: L10n.bundle)
         }
+    }
+}
+
+extension MenuBarModule {
+    /// Label for a bar module, derived from the window it renders rather than
+    /// hardcoded. Claude always reports 5h and 7d, but Codex defines its windows
+    /// by duration and may expose only a weekly one — a literal "5H" would be a
+    /// lie there.
+    static func compactLabel(for window: UsageWindowModel) -> String {
+        let seconds = Int(window.windowSeconds)
+        if seconds % 86_400 == 0 { return "\(seconds / 86_400)D" }
+        return "\(max(seconds / 3600, 1))H"
     }
 }
 
@@ -51,6 +69,12 @@ enum MenuBarModuleStore {
     static let storageKey = "menuBarModules"
     static let migrationKey = "menuBarModulesMigratedV1"
     static let legacyShowAccountNameKey = "showAccountName"
+
+    /// Claude keeps the original key so upgrades preserve the user's layout.
+    /// Other providers did not exist pre-1.8 and get their own namespaced key.
+    static func storageKey(for provider: AIProviderType) -> String {
+        provider == .claudeCode ? storageKey : "menuBarModules.\(provider.rawValue.lowercased())"
+    }
 
     /// Decode resiliently: a single unknown/renamed rawValue (e.g. from a
     /// newer build or hand-edited prefs) must NOT wipe the whole list. We

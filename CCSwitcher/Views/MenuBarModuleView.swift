@@ -28,9 +28,26 @@ struct MenuBarModuleView: View {
                 .lineLimit(1)
                 .foregroundStyle(.primary)
                 .fixedSize()
+        } else if module == .scopedLimitBar {
+            // Renders nothing at all when there's no scoped limit — an empty
+            // bar in its place would look like a bug rather than "not present".
+            if let limit = activeCard?.scopedLimits.first {
+                VStack(alignment: .center, spacing: 0) {
+                    Text(limit.modelName.prefix(4).uppercased())
+                        .font(.system(size: 8, weight: .semibold))
+                        .kerning(0.2)
+                        .foregroundStyle(.primary)
+                        .fixedSize()
+                        .frame(height: labelRowHeight)
+
+                    UtilizationBar(utilization: limit.utilization)
+                        .frame(height: valueRowHeight)
+                }
+                .fixedSize()
+            }
         } else {
             VStack(alignment: .center, spacing: 0) {
-                Text(module.compactLabel)
+                Text(compactLabel)
                     .font(.system(size: 8, weight: .semibold))
                     .kerning(0.2)
                     .foregroundStyle(.primary)
@@ -41,6 +58,19 @@ struct MenuBarModuleView: View {
                     .frame(height: valueRowHeight)
             }
             .fixedSize()
+        }
+    }
+
+    /// Top-line label: derived from the actual window once its data has
+    /// loaded, falling back to the module's static label before then.
+    private var compactLabel: String {
+        switch module {
+        case .sessionBar, .sessionBarPlain:
+            window(.session).map(MenuBarModule.compactLabel(for:)) ?? module.compactLabel
+        case .weeklyBar, .weeklyBarPlain:
+            window(.weekly).map(MenuBarModule.compactLabel(for:)) ?? module.compactLabel
+        default:
+            module.compactLabel
         }
     }
 
@@ -83,6 +113,11 @@ struct MenuBarModuleView: View {
                 .font(.system(size: 10, weight: .medium).monospacedDigit())
                 .foregroundStyle(.primary)
                 .fixedSize()
+
+        case .scopedLimitBar:
+            // Handled entirely in `body` (it needs to render nothing rather
+            // than an empty bar when there's no scoped limit); unreachable here.
+            EmptyView()
         }
     }
 
