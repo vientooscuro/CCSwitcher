@@ -44,6 +44,13 @@ protocol ProviderSurface: AnyObject, ObservableObject where ObjectWillChangePubl
     var accountRows: [AccountRowModel] { get }
     var activity: ActivitySummaryModel { get }
     var cost: CostSeriesModel { get }
+    /// This surface's data, flattened for the desktop widget.
+    var widgetSnapshot: WidgetData { get }
+    /// Set by `ProviderHub` at init. Every surface calls this once a refresh
+    /// finishes so the hub can write the widget snapshot — regardless of
+    /// whether the refresh was triggered through the hub or, for Claude, its
+    /// own internal timer.
+    var didRefresh: (() -> Void)? { get set }
 
     func refresh(force: Bool) async
     func switchTo(accountId: UUID) async

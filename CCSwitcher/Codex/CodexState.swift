@@ -22,6 +22,9 @@ final class CodexState: ObservableObject, ProviderSurface {
     @Published private var costSeries: CostSeriesModel = .empty
     @Published private var activitySummary: ActivitySummaryModel = .empty
 
+    /// Set by `ProviderHub` at init. Called once a refresh finishes.
+    var didRefresh: (() -> Void)?
+
     /// Identity for the single Codex account stage 2 knows about. Derived from
     /// the account id so it is stable across launches without persistence,
     /// which stage 3 replaces with real per-account records.
@@ -99,6 +102,39 @@ final class CodexState: ObservableObject, ProviderSurface {
 
     var cost: CostSeriesModel { costSeries }
 
+    /// Flattens Codex state for the desktop widget. The per-account mapping
+    /// (windows matched by `kind`, not position) lives in the pure
+    /// `CodexDisplayMapper.widgetAccount`, unit-tested independently of this
+    /// class's network/credential state.
+    var widgetSnapshot: WidgetData {
+        let card = accountCards.first
+        let obfuscate = !UserDefaults.standard.bool(forKey: "showFullEmail")
+        let displayEmail = email.map { obfuscate ? $0.obfuscatedEmail() : $0 }
+
+        let widgetAccounts: [WidgetAccountData] = displayEmail.map { displayEmail in
+            [CodexDisplayMapper.widgetAccount(
+                email: displayEmail,
+                displayName: name ?? displayEmail,
+                planBadge: CodexDisplayMapper.planBadge(from: planType),
+                windows: card?.windows ?? [],
+                scopedLimits: card?.scopedLimits ?? [],
+                credits: card?.credits,
+                error: usageError
+            )]
+        } ?? []
+
+        return WidgetData(
+            accounts: widgetAccounts,
+            todayCost: costSeries.todayCost,
+            conversationTurns: activitySummary.turns,
+            activeCodingTime: activitySummary.activeTimeText,
+            linesWritten: activitySummary.linesWritten ?? 0,
+            modelUsage: Dictionary(uniqueKeysWithValues: activitySummary.perModel.map { ($0.displayName, $0.count) }),
+            lastUpdated: Date(),
+            provider: AIProviderType.codex.rawValue
+        )
+    }
+
     // MARK: - Refresh
 
     func refresh(force: Bool) async {
@@ -134,6 +170,7 @@ final class CodexState: ObservableObject, ProviderSurface {
 
         lastRefresh = Date()
         isLoading = false
+        didRefresh?()
     }
 
     private func refreshLimits(auth: CodexAuth?, force: Bool) async {

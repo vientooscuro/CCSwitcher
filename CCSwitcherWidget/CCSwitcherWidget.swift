@@ -5,6 +5,66 @@ import SwiftUI
 
 private let brandColor = Color(red: 0xE8 / 255.0, green: 0x6D / 255.0, blue: 0x45 / 255.0)
 
+// MARK: - Provider Theme
+
+/// Widget-local palette, keyed off `WidgetData.provider`. Not shared with
+/// `CCSwitcher/Providers/ProviderTheme.swift` — that struct's Codex colours
+/// route through `CCSwitcher/Models/AppStyle.swift` and `BrandColor.swift`,
+/// which are app-target-only files the sandboxed widget extension cannot see.
+/// The six Codex hex values below are transcribed from there; keep them
+/// in sync if that source ever changes.
+private struct WidgetTheme {
+    let accent: Color
+    let containerBackground: AnyShapeStyle
+    let cardFill: Color
+    let cardBorder: Color
+    let textPrimary: AnyShapeStyle
+    let textSecondary: AnyShapeStyle
+    let textTertiary: AnyShapeStyle
+    let quaternary: AnyShapeStyle
+
+    /// Today's look, unchanged: system materials and semantic text styles.
+    static let claude = WidgetTheme(
+        accent: brandColor,
+        containerBackground: AnyShapeStyle(.fill.tertiary),
+        cardFill: Color.white.opacity(0.04),
+        cardBorder: Color.white.opacity(0.08),
+        textPrimary: AnyShapeStyle(.primary),
+        textSecondary: AnyShapeStyle(.secondary),
+        textTertiary: AnyShapeStyle(.tertiary),
+        quaternary: AnyShapeStyle(.quaternary)
+    )
+
+    /// Modeled on ChatGPT Desktop: flat near-black, monochrome accents.
+    /// Utilization colours stay semantic (`colorForUtilization`) in both
+    /// themes — a monochrome bar makes the percentage unreadable at a glance.
+    static let codex = WidgetTheme(
+        accent: Color(hex: 0xFFFFFF),
+        containerBackground: AnyShapeStyle(Color(hex: 0x0D0D0D)),
+        cardFill: Color(hex: 0x171717),
+        cardBorder: Color(hex: 0x2E2E2E),
+        textPrimary: AnyShapeStyle(Color(hex: 0xECECEC)),
+        textSecondary: AnyShapeStyle(Color(hex: 0x9A9A9A)),
+        textTertiary: AnyShapeStyle(Color(hex: 0x9A9A9A)),
+        quaternary: AnyShapeStyle(Color(hex: 0x9A9A9A).opacity(0.4))
+    )
+
+    static func theme(for provider: String?) -> WidgetTheme {
+        provider == "Codex" ? .codex : .claude
+    }
+}
+
+private extension Color {
+    /// 24-bit hex, for the Codex palette transcribed from `ProviderTheme`.
+    init(hex: UInt32) {
+        self.init(
+            red: Double((hex >> 16) & 0xFF) / 255,
+            green: Double((hex >> 8) & 0xFF) / 255,
+            blue: Double(hex & 0xFF) / 255
+        )
+    }
+}
+
 // MARK: - Timeline Entry
 
 struct CCSwitcherEntry: TimelineEntry {
@@ -74,15 +134,16 @@ struct CCSwitcherWidgetEntryView: View {
 
     var body: some View {
         if let data = entry.data {
+            let theme = WidgetTheme.theme(for: data.provider)
             switch family {
             case .systemSmall:
-                SmallWidgetView(data: data)
+                SmallWidgetView(data: data, theme: theme)
             case .systemMedium:
-                MediumWidgetView(data: data)
+                MediumWidgetView(data: data, theme: theme)
             case .systemLarge:
-                LargeWidgetView(data: data)
+                LargeWidgetView(data: data, theme: theme)
             default:
-                SmallWidgetView(data: data)
+                SmallWidgetView(data: data, theme: theme)
             }
         } else {
             emptyState
@@ -109,6 +170,7 @@ struct CCSwitcherWidgetEntryView: View {
 
 private struct SmallWidgetView: View {
     let data: WidgetData
+    let theme: WidgetTheme
 
     private var activeAccount: WidgetAccountData? {
         data.accounts.first(where: \.isActive) ?? data.accounts.first
@@ -120,24 +182,26 @@ private struct SmallWidgetView: View {
             HStack(spacing: 5) {
                 Image(systemName: "brain.head.profile")
                     .font(.caption)
-                    .foregroundStyle(brandColor)
+                    .foregroundStyle(theme.accent)
                     .widgetAccentable()
                 if let account = activeAccount {
                     Text(account.displayName)
                         .font(.caption.weight(.semibold))
+                        .foregroundStyle(theme.textPrimary)
                         .lineLimit(1)
                     Spacer()
                     if let sub = account.subscriptionType {
                         Text(sub)
                             .font(.caption2.weight(.medium))
-                            .foregroundStyle(brandColor)
+                            .foregroundStyle(theme.accent)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
-                            .background(brandColor.opacity(0.15), in: Capsule())
+                            .background(theme.accent.opacity(0.15), in: Capsule())
                     }
                 } else {
                     Text("CCSwitcher")
                         .font(.caption.weight(.semibold))
+                        .foregroundStyle(theme.textPrimary)
                     Spacer()
                 }
             }
@@ -154,12 +218,12 @@ private struct SmallWidgetView: View {
                         if let msg = account.errorMessage {
                             Text(msg)
                                 .font(.caption2)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(theme.textSecondary)
                                 .lineLimit(2)
                         } else {
                             Text("Error")
                                 .font(.caption2)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(theme.textSecondary)
                                 .lineLimit(2)
                         }
                     }
@@ -180,14 +244,14 @@ private struct SmallWidgetView: View {
                         .foregroundStyle(.green)
                     Text("today")
                         .font(.caption)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(theme.textTertiary)
                     Spacer()
                 }
             } else {
                 Spacer()
                 Text("No accounts")
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.textSecondary)
                 Spacer()
             }
         }
@@ -207,7 +271,7 @@ private struct SmallWidgetView: View {
             HStack {
                 labelView
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.textSecondary)
                 Spacer()
                 Text("\(Int(pct))%")
                     .font(.caption2.weight(.medium).monospacedDigit())
@@ -216,7 +280,7 @@ private struct SmallWidgetView: View {
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 2.5)
-                        .fill(.quaternary)
+                        .fill(theme.quaternary)
                         .frame(height: 5)
                     RoundedRectangle(cornerRadius: 2.5)
                         .fill(colorForUtilization(pct))
@@ -232,6 +296,7 @@ private struct SmallWidgetView: View {
 
 private struct MediumWidgetView: View {
     let data: WidgetData
+    let theme: WidgetTheme
 
     private var activeAccount: WidgetAccountData? {
         data.accounts.first(where: \.isActive) ?? data.accounts.first
@@ -243,25 +308,26 @@ private struct MediumWidgetView: View {
             HStack(spacing: 5) {
                 Image(systemName: "brain.head.profile")
                     .font(.caption)
-                    .foregroundStyle(brandColor)
+                    .foregroundStyle(theme.accent)
                     .widgetAccentable()
                 if let account = activeAccount {
                     Text(account.displayName)
                         .font(.caption.weight(.medium))
+                        .foregroundStyle(theme.textPrimary)
                         .lineLimit(1)
                     if let sub = account.subscriptionType {
                         Text(sub)
                             .font(.caption2.weight(.medium))
-                            .foregroundStyle(brandColor)
+                            .foregroundStyle(theme.accent)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
-                            .background(brandColor.opacity(0.15), in: Capsule())
+                            .background(theme.accent.opacity(0.15), in: Capsule())
                     }
                 }
                 Spacer()
                 Text(data.lastUpdated, style: .relative)
                     .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(theme.textTertiary)
             }
 
             Spacer(minLength: 4)
@@ -279,12 +345,12 @@ private struct MediumWidgetView: View {
                                 if let msg = account.errorMessage {
                                     Text(msg)
                                         .font(.caption2)
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(theme.textSecondary)
                                         .lineLimit(2)
                                 } else {
                                     Text("Error")
                                         .font(.caption2)
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(theme.textSecondary)
                                         .lineLimit(2)
                                 }
                             }
@@ -308,7 +374,7 @@ private struct MediumWidgetView: View {
                                         .foregroundStyle(extra ? .orange : .gray)
                                     Text("Extra usage")
                                         .font(.caption2)
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(theme.textSecondary)
                                     Text(LocalizedStringKey(extra ? "On" : "Off"))
                                         .font(.caption2)
                                         .foregroundStyle(extra ? .orange : .gray)
@@ -322,13 +388,13 @@ private struct MediumWidgetView: View {
 
                 // Divider
                 Rectangle()
-                    .fill(.quaternary)
+                    .fill(theme.quaternary)
                     .frame(width: 1)
 
                 // Right: Activity stats
                 VStack(alignment: .leading, spacing: 0) {
                     Spacer(minLength: 0)
-                    statRow(icon: "dollarsign.circle", label: "Cost", value: formatCost(data.todayCost), valueColor: .green)
+                    statRow(icon: "dollarsign.circle", label: "Cost", value: formatCost(data.todayCost), valueColor: AnyShapeStyle(.green))
                     Spacer(minLength: 4)
                     statRow(icon: "bubble.left.and.bubble.right", label: "Turns", value: "\(data.conversationTurns)")
                     Spacer(minLength: 4)
@@ -356,12 +422,12 @@ private struct MediumWidgetView: View {
             HStack {
                 labelView
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.textSecondary)
                 Spacer()
                 if let reset = resetTime {
                     Text(reset)
                         .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(theme.textTertiary)
                 }
                 Text("\(Int(pct))%")
                     .font(.caption2.weight(.medium).monospacedDigit())
@@ -370,7 +436,7 @@ private struct MediumWidgetView: View {
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 2.5)
-                        .fill(.quaternary)
+                        .fill(theme.quaternary)
                         .frame(height: 5)
                     RoundedRectangle(cornerRadius: 2.5)
                         .fill(colorForUtilization(pct))
@@ -381,19 +447,19 @@ private struct MediumWidgetView: View {
         }
     }
 
-    private func statRow(icon: String, label: LocalizedStringKey, value: String, valueColor: Color = .primary) -> some View {
+    private func statRow(icon: String, label: LocalizedStringKey, value: String, valueColor: AnyShapeStyle? = nil) -> some View {
         HStack(spacing: 5) {
             Image(systemName: icon)
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.textSecondary)
                 .frame(width: 14)
             Text(label)
                 .font(.caption2)
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(theme.textTertiary)
             Spacer()
             Text(value)
                 .font(.caption.weight(.medium).monospacedDigit())
-                .foregroundStyle(valueColor)
+                .foregroundStyle(valueColor ?? theme.textPrimary)
         }
     }
 }
@@ -402,6 +468,7 @@ private struct MediumWidgetView: View {
 
 private struct LargeWidgetView: View {
     let data: WidgetData
+    let theme: WidgetTheme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -409,14 +476,15 @@ private struct LargeWidgetView: View {
             HStack(spacing: 5) {
                 Image(systemName: "brain.head.profile")
                     .font(.subheadline)
-                    .foregroundStyle(brandColor)
+                    .foregroundStyle(theme.accent)
                     .widgetAccentable()
                 Text("CCSwitcher")
                     .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(theme.textPrimary)
                 Spacer()
                 Text(data.lastUpdated, style: .relative)
                     .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(theme.textTertiary)
             }
 
             // Today's activity + model usage
@@ -425,25 +493,25 @@ private struct LargeWidgetView: View {
                     activityStat(icon: "bubble.left.and.bubble.right", value: "\(data.conversationTurns)", label: "Turns")
                     activityStat(icon: "clock", value: data.activeCodingTime, label: "Active")
                     activityStat(icon: "doc.text", value: "\(data.linesWritten)", label: "Lines")
-                    activityStat(icon: "dollarsign.circle", value: formatCost(data.todayCost), label: "Cost", valueColor: .green)
+                    activityStat(icon: "dollarsign.circle", value: formatCost(data.todayCost), label: "Cost", valueColor: AnyShapeStyle(.green))
                 }
 
                 if !data.modelUsage.isEmpty {
                     Rectangle()
-                        .fill(.quaternary)
+                        .fill(theme.quaternary)
                         .frame(height: 0.5)
                         .padding(.horizontal, 8)
 
                     HStack(spacing: 0) {
                         modelStat(name: "Fable", count: data.modelUsage["Fable"] ?? 0, color: .purple)
-                        modelStat(name: "Opus", count: data.modelUsage["Opus"] ?? 0, color: brandColor)
+                        modelStat(name: "Opus", count: data.modelUsage["Opus"] ?? 0, color: theme.accent)
                         modelStat(name: "Sonnet", count: data.modelUsage["Sonnet"] ?? 0, color: .blue)
                         modelStat(name: "Haiku", count: data.modelUsage["Haiku"] ?? 0, color: .green)
                     }
                 }
             }
             .padding(.vertical, 10)
-            .background(brandColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+            .background(theme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
 
             // Per-account cards — expand to fill remaining space
             ForEach(Array(data.accounts.enumerated()), id: \.offset) { _, account in
@@ -453,18 +521,18 @@ private struct LargeWidgetView: View {
         }
     }
 
-    private func activityStat(icon: String, value: String, label: LocalizedStringKey, valueColor: Color = .primary) -> some View {
+    private func activityStat(icon: String, value: String, label: LocalizedStringKey, valueColor: AnyShapeStyle? = nil) -> some View {
         VStack(spacing: 3) {
             Text(value)
                 .font(.callout.weight(.semibold).monospacedDigit())
-                .foregroundStyle(valueColor)
+                .foregroundStyle(valueColor ?? theme.textPrimary)
             HStack(spacing: 3) {
                 Image(systemName: icon)
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.textSecondary)
                 Text(label)
                     .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(theme.textTertiary)
             }
         }
         .frame(maxWidth: .infinity)
@@ -474,14 +542,14 @@ private struct LargeWidgetView: View {
         VStack(spacing: 2) {
             Text("\(count)")
                 .font(.caption.weight(.semibold).monospacedDigit())
-                .foregroundStyle(count > 0 ? .primary : .quaternary)
+                .foregroundStyle(count > 0 ? theme.textPrimary : theme.quaternary)
             HStack(spacing: 3) {
                 Circle()
                     .fill(color)
                     .frame(width: 6, height: 6)
                 Text(name)
                     .font(.caption2)
-                    .foregroundStyle(count > 0 ? .tertiary : .quaternary)
+                    .foregroundStyle(count > 0 ? theme.textTertiary : theme.quaternary)
             }
         }
         .frame(maxWidth: .infinity)
@@ -493,9 +561,10 @@ private struct LargeWidgetView: View {
             HStack(spacing: 6) {
                 Image(systemName: "brain.head.profile")
                     .font(.caption2)
-                    .foregroundStyle(account.isActive ? brandColor : .secondary)
+                    .foregroundStyle(account.isActive ? AnyShapeStyle(theme.accent) : theme.textSecondary)
                 Text(account.displayName)
                     .font(.caption.weight(.medium))
+                    .foregroundStyle(theme.textPrimary)
                     .lineLimit(1)
                 if account.isActive {
                     Text("ACTIVE")
@@ -512,7 +581,7 @@ private struct LargeWidgetView: View {
                 if let sub = account.subscriptionType {
                     Text(sub)
                         .font(.caption2.weight(.medium))
-                        .foregroundStyle(brandColor)
+                        .foregroundStyle(theme.accent)
                 }
             }
 
@@ -524,12 +593,12 @@ private struct LargeWidgetView: View {
                     if let msg = account.errorMessage {
                         Text(msg)
                             .font(.caption2)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(theme.textSecondary)
                             .lineLimit(1)
                     } else {
                         Text("Error")
                             .font(.caption2)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(theme.textSecondary)
                             .lineLimit(1)
                     }
                 }
@@ -545,8 +614,8 @@ private struct LargeWidgetView: View {
         .padding(.vertical, 12)
         .background(
             RoundedRectangle(cornerRadius: 8)
-                .fill(account.isActive ? brandColor.opacity(0.22) : Color.white.opacity(0.04))
-                .strokeBorder(account.isActive ? brandColor.opacity(0.6) : Color.white.opacity(0.08), lineWidth: account.isActive ? 1.0 : 0.5)
+                .fill(account.isActive ? theme.accent.opacity(0.22) : theme.cardFill)
+                .strokeBorder(account.isActive ? theme.accent.opacity(0.6) : theme.cardBorder, lineWidth: account.isActive ? 1.0 : 0.5)
         )
     }
 
@@ -563,12 +632,12 @@ private struct LargeWidgetView: View {
         return HStack(spacing: 6) {
             labelView
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.textSecondary)
                 .frame(width: 48, alignment: .leading)
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 2.5)
-                        .fill(.quaternary)
+                        .fill(theme.quaternary)
                         .frame(height: 5)
                     RoundedRectangle(cornerRadius: 2.5)
                         .fill(colorForUtilization(pct))
@@ -588,6 +657,7 @@ private struct LargeWidgetView: View {
 
 private struct CircleWidgetView: View {
     let data: WidgetData
+    let theme: WidgetTheme
 
     private var activeAccount: WidgetAccountData? {
         data.accounts.first(where: \.isActive) ?? data.accounts.first
@@ -599,19 +669,20 @@ private struct CircleWidgetView: View {
             HStack(spacing: 5) {
                 Image(systemName: "brain.head.profile")
                     .font(.caption)
-                    .foregroundStyle(brandColor)
+                    .foregroundStyle(theme.accent)
                     .widgetAccentable()
                 Text(activeAccount?.displayName ?? "CCSwitcher")
                     .font(.caption.weight(.semibold))
+                    .foregroundStyle(theme.textPrimary)
                     .lineLimit(1)
                 Spacer()
                 if let sub = activeAccount?.subscriptionType {
                     Text(sub)
                         .font(.caption2.weight(.medium))
-                        .foregroundStyle(brandColor)
+                        .foregroundStyle(theme.accent)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
-                        .background(brandColor.opacity(0.15), in: Capsule())
+                        .background(theme.accent.opacity(0.15), in: Capsule())
                 }
             }
 
@@ -649,13 +720,13 @@ private struct CircleWidgetView: View {
                     if let msg = account.errorMessage {
                         Text(msg)
                             .font(.caption2)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(theme.textSecondary)
                             .multilineTextAlignment(.center)
                             .lineLimit(3)
                     } else {
                         Text("Error")
                             .font(.caption2)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(theme.textSecondary)
                             .multilineTextAlignment(.center)
                             .lineLimit(3)
                     }
@@ -663,7 +734,7 @@ private struct CircleWidgetView: View {
             } else {
                 Text("No accounts")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.textSecondary)
             }
 
             Spacer(minLength: 0)
@@ -683,23 +754,24 @@ private struct CircleWidgetView: View {
         return VStack(spacing: 4) {
             ZStack {
                 Circle()
-                    .stroke(.quaternary, lineWidth: 6)
+                    .stroke(theme.quaternary, lineWidth: 6)
                 Circle()
                     .trim(from: 0, to: min(pct / 100.0, 1.0))
                     .stroke(accent, style: StrokeStyle(lineWidth: 6, lineCap: .round))
                     .rotationEffect(.degrees(-90))
                 Text("\(Int(pct))%")
                     .font(.caption.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(theme.textPrimary)
             }
             .aspectRatio(1, contentMode: .fit)
 
             labelView
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.textSecondary)
             if let reset = resetTime {
                 Text(reset)
                     .font(.system(size: 9))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(theme.textTertiary)
                     .lineLimit(1)
             }
         }
@@ -712,7 +784,7 @@ private struct CircleWidgetEntryView: View {
 
     var body: some View {
         if let data = entry.data {
-            CircleWidgetView(data: data)
+            CircleWidgetView(data: data, theme: .theme(for: data.provider))
         } else {
             VStack(spacing: 8) {
                 Image(systemName: "brain.head.profile")
@@ -749,7 +821,7 @@ struct CCSwitcherWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: CCSwitcherProvider()) { entry in
             CCSwitcherWidgetEntryView(entry: entry)
-                .containerBackground(.fill.tertiary, for: .widget)
+                .containerBackground(WidgetTheme.theme(for: entry.data?.provider).containerBackground, for: .widget)
         }
         .configurationDisplayName("CCSwitcher")
         .description("Monitor your Claude Code account usage, costs, and activity.")
@@ -763,7 +835,7 @@ struct CCSwitcherCircleWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: CCSwitcherProvider()) { entry in
             CircleWidgetEntryView(entry: entry)
-                .containerBackground(.fill.tertiary, for: .widget)
+                .containerBackground(WidgetTheme.theme(for: entry.data?.provider).containerBackground, for: .widget)
         }
         .configurationDisplayName("CCSwitcher Rings")
         .description("Session and weekly usage shown as circular progress rings.")

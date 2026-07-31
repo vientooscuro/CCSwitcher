@@ -1,6 +1,5 @@
 import SwiftUI
 import Combine
-import WidgetKit
 
 private let log = FileLog("AppState")
 
@@ -51,9 +50,10 @@ final class AppState: ObservableObject {
     /// shouldn't trigger a synchronous JSONEncoder + UserDefaults write.
     private var pendingSaveTask: Task<Void, Never>?
 
-    /// Hash of the last widget snapshot we wrote — used to skip
-    /// `WidgetCenter.reloadAllTimelines` when nothing meaningful changed.
-    private var lastWidgetSnapshotHash: Int?
+    /// Set by `ProviderHub` at init. `refresh()` and `updateAccountLabel`
+    /// call this instead of writing the widget snapshot directly — only the
+    /// hub knows whether Claude is the active provider.
+    var didRefresh: (() -> Void)?
 
     /// True when the popover is visible. While false, the auto-refresh timer
     /// pauses so we don't spend CPU/network when the user can't see the UI.
@@ -178,7 +178,7 @@ final class AppState: ObservableObject {
 
         log.info("[refresh] Usage: weekly=\(self.usageSummary.weeklyMessages) msgs, \(self.activeSessions.count) active sessions, today=$\(String(format: "%.2f", cost.todayCost)) turns=\(activity.conversationTurns)")
 
-        updateWidgetData()
+        didRefresh?()
         isLoading = false
     }
 
@@ -383,7 +383,7 @@ final class AppState: ObservableObject {
             activeAccount = accounts[index]
         }
         scheduleSave()
-        updateWidgetData()
+        didRefresh?()
         log.info("[updateAccountLabel] Set label for \(account.email): \(trimmed ?? "nil")")
     }
 
@@ -872,7 +872,10 @@ final class AppState: ObservableObject {
 
     // MARK: - Widget
 
-    private func updateWidgetData() {
+    /// Flattens current Claude state for the desktop widget. `ProviderHub`
+    /// reads this only when Claude is the active provider, hashes it, and
+    /// writes it — this computed property does neither.
+    var widgetSnapshot: WidgetData {
         let showFullEmail = UserDefaults.standard.bool(forKey: "showFullEmail")
         let widgetAccounts = accounts.map { account in
             let usage = accountUsage[account.id]
@@ -895,54 +898,16 @@ final class AppState: ObservableObject {
             )
         }
 
-        // Hash the meaningful fields. `lastUpdated` is excluded so the
-        // timestamp alone never triggers a needless widget reload.
-        var hasher = Hasher()
-        hasher.combine(costSummary.todayCost)
-        hasher.combine(activityStats.conversationTurns)
-        hasher.combine(activityStats.activeCodingTimeString)
-        hasher.combine(activityStats.linesWritten)
-        for (k, v) in activityStats.modelUsage.sorted(by: { $0.key < $1.key }) {
-            hasher.combine(k); hasher.combine(v)
-        }
-        for w in widgetAccounts {
-            hasher.combine(w.email)
-            hasher.combine(w.displayName)
-            hasher.combine(w.subscriptionType ?? "")
-            hasher.combine(w.isActive)
-            hasher.combine(w.sessionUtilization ?? -1)
-            hasher.combine(w.sessionResetTime ?? "")
-            hasher.combine(w.weeklyUtilization ?? -1)
-            hasher.combine(w.weeklyResetTime ?? "")
-            hasher.combine(w.extraUsageEnabled ?? false)
-            hasher.combine(w.hasError)
-            hasher.combine(w.errorMessage ?? "")
-            for s in w.scopedLimits ?? [] {
-                hasher.combine(s.modelName)
-                hasher.combine(Int(s.utilization))
-                hasher.combine(s.resetTime ?? "")
-            }
-        }
-        let hash = hasher.finalize()
-
-        let data = WidgetData(
+        return WidgetData(
             accounts: widgetAccounts,
             todayCost: costSummary.todayCost,
             conversationTurns: activityStats.conversationTurns,
             activeCodingTime: activityStats.activeCodingTimeString,
             linesWritten: activityStats.linesWritten,
             modelUsage: activityStats.modelUsage,
-            lastUpdated: Date()
+            lastUpdated: Date(),
+            provider: AIProviderType.claudeCode.rawValue
         )
-        data.save()
-
-        if hash != lastWidgetSnapshotHash {
-            lastWidgetSnapshotHash = hash
-            WidgetCenter.shared.reloadAllTimelines()
-            log.debug("[updateWidgetData] Widget reloaded (data changed)")
-        } else {
-            log.debug("[updateWidgetData] Widget data unchanged, skipping reload")
-        }
     }
 
     // MARK: - Persistence

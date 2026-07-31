@@ -109,6 +109,56 @@ final class CodexUsageMappingTests: XCTestCase {
         XCTAssertNil(CodexDisplayMapper.planBadge(from: nil))
     }
 
+    // MARK: - Widget snapshot mapping (windows by kind, never by position)
+
+    func testWidgetAccountMapsSessionAndWeeklyWindowsByKind() {
+        // Secondary slot first, on purpose — the mapping must not assume order.
+        let windows = [
+            UsageWindowModel(kind: .weekly, utilization: 28, resetsAt: Date(timeIntervalSince1970: 200), windowSeconds: 604_800),
+            UsageWindowModel(kind: .session, utilization: 42, resetsAt: Date(timeIntervalSince1970: 100), windowSeconds: 18_000)
+        ]
+        let account = CodexDisplayMapper.widgetAccount(
+            email: "us***@ex***.com",
+            displayName: "My Org",
+            planBadge: "Pro",
+            windows: windows,
+            scopedLimits: [],
+            credits: nil,
+            error: nil
+        )
+        XCTAssertEqual(account.sessionUtilization, 42)
+        XCTAssertEqual(account.weeklyUtilization, 28)
+    }
+
+    /// Codex may expose only a weekly window — a Claude-shaped literal "5H"
+    /// session bar would be a lie, so the session fields must stay nil.
+    func testWidgetAccountLeavesSessionNilWhenOnlyWeeklyWindowExists() {
+        let windows = [UsageWindowModel(kind: .weekly, utilization: 10, resetsAt: nil, windowSeconds: 604_800)]
+        let account = CodexDisplayMapper.widgetAccount(
+            email: "e", displayName: "n", planBadge: nil, windows: windows, scopedLimits: [], credits: nil, error: nil
+        )
+        XCTAssertNil(account.sessionUtilization)
+        XCTAssertNil(account.sessionResetTime)
+        XCTAssertEqual(account.weeklyUtilization, 10)
+    }
+
+    func testWidgetAccountMapsCreditsToExtraUsageEnabled() {
+        let enabled = CreditPoolModel(isEnabled: true, isUnlimited: false, balanceText: "12.50", utilization: nil)
+        let account = CodexDisplayMapper.widgetAccount(
+            email: "e", displayName: "n", planBadge: nil, windows: [], scopedLimits: [], credits: enabled, error: nil
+        )
+        XCTAssertEqual(account.extraUsageEnabled, true)
+    }
+
+    func testWidgetAccountCarriesErrorState() {
+        let error = ProviderErrorModel(message: "boom", needsReauth: false, isRateLimited: false)
+        let account = CodexDisplayMapper.widgetAccount(
+            email: "e", displayName: "n", planBadge: nil, windows: [], scopedLimits: [], credits: nil, error: error
+        )
+        XCTAssertTrue(account.hasError)
+        XCTAssertEqual(account.errorMessage, "boom")
+    }
+
     /// Rollout files carry window lengths in minutes rather than seconds.
     func testLocalSnapshotConvertsWindowMinutes() {
         let snapshot = CodexRateLimitSnapshot(

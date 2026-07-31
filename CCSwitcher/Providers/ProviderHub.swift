@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import WidgetKit
 
 private let log = FileLog("ProviderHub")
 
@@ -20,6 +21,10 @@ final class ProviderHub: ObservableObject {
     private var forwarders: [AnyCancellable] = []
     private var periodicRefreshTimer: Timer?
     private var periodicRefreshInterval: TimeInterval = 300
+
+    /// Hash of the last widget snapshot written — skips
+    /// `WidgetCenter.reloadAllTimelines` when nothing meaningful changed.
+    private var lastWidgetSnapshotHash: Int?
 
     private static let persistenceKey = "activeProvider"
 
@@ -48,6 +53,7 @@ final class ProviderHub: ObservableObject {
             available: effective
         )
         installForwarders()
+        wireWidgetSnapshotUpdates()
         // MenuBarConfig.shared defaults to Claude; sync it here too so a
         // relaunch with, say, Codex persisted as active does not leave the
         // strip's module list stuck on Claude's until the user switches away
@@ -96,6 +102,22 @@ final class ProviderHub: ObservableObject {
         periodicRefreshTimer = nil
     }
 
+    /// The active provider owns the widget snapshot. Writing from both would
+    /// make the widget flicker between providers on every refresh.
+    func updateWidgetSnapshot() {
+        let data = surface.widgetSnapshot
+        data.save()
+
+        let hash = Self.widgetSnapshotHash(data)
+        guard hash != lastWidgetSnapshotHash else {
+            log.debug("[updateWidgetSnapshot] unchanged, skipping reload")
+            return
+        }
+        lastWidgetSnapshotHash = hash
+        WidgetCenter.shared.reloadAllTimelines()
+        log.debug("[updateWidgetSnapshot] reloaded (data changed, provider=\(data.provider ?? "nil"))")
+    }
+
     private func installForwarders() {
         forwarders = surfaces.values.map { surface in
             surface.objectWillChange.sink { [weak self] _ in
@@ -104,5 +126,49 @@ final class ProviderHub: ObservableObject {
                 Task { @MainActor [weak self] in self?.objectWillChange.send() }
             }
         }
+    }
+
+    /// Every surface calls `didRefresh` once its own refresh finishes —
+    /// whether that refresh was triggered through this hub or, for Claude,
+    /// its own internal timer. Wiring it here (rather than in each surface)
+    /// keeps the "who writes the widget" decision in one place.
+    private func wireWidgetSnapshotUpdates() {
+        surfaces.values.forEach { surface in
+            surface.didRefresh = { [weak self] in self?.updateWidgetSnapshot() }
+        }
+    }
+
+    /// Hashes the fields that matter for the widget's rendered content.
+    /// `lastUpdated` is excluded so the timestamp alone never triggers a
+    /// needless reload.
+    private static func widgetSnapshotHash(_ data: WidgetData) -> Int {
+        var hasher = Hasher()
+        hasher.combine(data.provider ?? "")
+        hasher.combine(data.todayCost)
+        hasher.combine(data.conversationTurns)
+        hasher.combine(data.activeCodingTime)
+        hasher.combine(data.linesWritten)
+        for (k, v) in data.modelUsage.sorted(by: { $0.key < $1.key }) {
+            hasher.combine(k); hasher.combine(v)
+        }
+        for w in data.accounts {
+            hasher.combine(w.email)
+            hasher.combine(w.displayName)
+            hasher.combine(w.subscriptionType ?? "")
+            hasher.combine(w.isActive)
+            hasher.combine(w.sessionUtilization ?? -1)
+            hasher.combine(w.sessionResetTime ?? "")
+            hasher.combine(w.weeklyUtilization ?? -1)
+            hasher.combine(w.weeklyResetTime ?? "")
+            hasher.combine(w.extraUsageEnabled ?? false)
+            hasher.combine(w.hasError)
+            hasher.combine(w.errorMessage ?? "")
+            for s in w.scopedLimits ?? [] {
+                hasher.combine(s.modelName)
+                hasher.combine(Int(s.utilization))
+                hasher.combine(s.resetTime ?? "")
+            }
+        }
+        return hasher.finalize()
     }
 }

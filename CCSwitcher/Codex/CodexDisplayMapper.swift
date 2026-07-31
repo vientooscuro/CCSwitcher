@@ -83,4 +83,43 @@ enum CodexDisplayMapper {
     static func notice(from response: CodexUsageResponse, isStale: Bool) -> String? {
         notice(from: CodexRateLimitSnapshot(response: response), isStale: isStale)
     }
+
+    /// Flattens one Codex account for the desktop widget. `WidgetAccountData`
+    /// was shaped for Claude's fixed five-hour/seven-day windows, so windows
+    /// are matched by `kind` — never by position, since Codex's primary and
+    /// secondary slots do not reliably correspond to session and weekly (see
+    /// `UsageWindowModel.Kind`). Anything Codex has no equivalent for is left
+    /// nil rather than reshaping the type.
+    static func widgetAccount(
+        email: String,
+        displayName: String,
+        planBadge: String?,
+        windows: [UsageWindowModel],
+        scopedLimits: [ScopedLimitModel],
+        credits: CreditPoolModel?,
+        error: ProviderErrorModel?
+    ) -> WidgetAccountData {
+        let sessionWindow = windows.first { $0.kind == .session }
+        let weeklyWindow = windows.first { $0.kind == .weekly }
+        return WidgetAccountData(
+            email: email,
+            displayName: displayName,
+            subscriptionType: planBadge,
+            isActive: true,
+            sessionUtilization: sessionWindow?.utilization,
+            sessionResetTime: sessionWindow.flatMap { UsageWindowFormat.resetText(until: $0.resetsAt) },
+            weeklyUtilization: weeklyWindow?.utilization,
+            weeklyResetTime: weeklyWindow.flatMap { UsageWindowFormat.resetText(until: $0.resetsAt) },
+            extraUsageEnabled: credits?.isEnabled,
+            hasError: error != nil,
+            errorMessage: error?.message,
+            scopedLimits: scopedLimits.map {
+                WidgetScopedLimit(
+                    modelName: $0.modelName,
+                    utilization: $0.utilization,
+                    resetTime: UsageWindowFormat.resetText(until: $0.resetsAt)
+                )
+            }
+        )
+    }
 }

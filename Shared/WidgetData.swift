@@ -36,6 +36,31 @@ struct WidgetData: Codable {
     let linesWritten: Int
     let modelUsage: [String: Int]
     let lastUpdated: Date
+    /// Raw value of `AIProviderType`. Optional so a snapshot written by an
+    /// older build still decodes — the widget then falls back to Claude
+    /// styling. Kept `Codable`-synthesized (no custom `init(from:)`), which is
+    /// what makes a missing key decode as nil rather than fail.
+    let provider: String?
+
+    init(
+        accounts: [WidgetAccountData],
+        todayCost: Double,
+        conversationTurns: Int,
+        activeCodingTime: String,
+        linesWritten: Int,
+        modelUsage: [String: Int],
+        lastUpdated: Date,
+        provider: String? = nil
+    ) {
+        self.accounts = accounts
+        self.todayCost = todayCost
+        self.conversationTurns = conversationTurns
+        self.activeCodingTime = activeCodingTime
+        self.linesWritten = linesWritten
+        self.modelUsage = modelUsage
+        self.lastUpdated = lastUpdated
+        self.provider = provider
+    }
 
     // Team-ID-prefixed App Group. macOS Sequoia (15+) prompts for App
     // Management on `group.<bundle-id>` style identifiers; the
