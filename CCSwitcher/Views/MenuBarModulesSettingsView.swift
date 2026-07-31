@@ -5,7 +5,7 @@ import SwiftUI
 /// exactly what will appear in the menu bar.
 struct MenuBarModulesSettingsView: View {
     @AppStorage("showFullEmail") private var showFullEmail = false
-    @EnvironmentObject private var appState: AppState
+    @EnvironmentObject private var hub: ProviderHub
     @EnvironmentObject private var config: MenuBarConfig
 
     @State private var rows: [Row] = []
@@ -34,7 +34,7 @@ struct MenuBarModulesSettingsView: View {
                         Spacer(minLength: 8)
                         MenuBarModuleView(
                             module: row.module,
-                            appState: appState,
+                            hub: hub,
                             showFullEmail: showFullEmail,
                             tick: tick
                         )
@@ -84,7 +84,7 @@ struct MenuBarModulesSettingsView: View {
             ForEach(rows.filter(\.isEnabled)) { row in
                 MenuBarModuleView(
                     module: row.module,
-                    appState: appState,
+                    hub: hub,
                     showFullEmail: showFullEmail,
                     tick: tick
                 )

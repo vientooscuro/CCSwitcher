@@ -65,10 +65,14 @@ extension View {
 
 /// The main popover content shown when clicking the menubar icon.
 struct MainMenuView: View {
-    @EnvironmentObject private var appState: AppState
+    @EnvironmentObject private var hub: ProviderHub
     @AppStorage("refreshInterval") private var refreshInterval: Double = 300
-    @AppStorage("showFullEmail") private var showFullEmail = false
     @State private var selectedTab: Tab = .usage
+
+    // The theme for the currently active provider. Applied to the subtree below
+    // via `.environment(\.providerTheme, theme)` — this is the root that
+    // injects it; Task 10-12 views further down just read the environment value.
+    private var theme: ProviderTheme { hub.theme }
 
     // Measured heights driving the popover frame.
     // Defaults are reasonable fallbacks for the first render pass, before
@@ -142,7 +146,9 @@ struct MainMenuView: View {
                     }
             }
         )
-        .background(.ultraThinMaterial)
+        .background(panelBackground)
+        .environment(\.providerTheme, theme)
+        .preferredColorScheme(theme.forcedColorScheme)
         .onAppear {
             popoverLog.info("[appear] tab=\(self.selectedTab.rawValue) chrome=\(self.chromeHeight) usage=\(self.usageContentHeight) popover=\(self.popoverHeight)")
         }
@@ -179,6 +185,14 @@ struct MainMenuView: View {
         let desired = chromeHeight + usageContentHeight + 1
 
         return min(maxHeight, desired)
+    }
+
+    @ViewBuilder
+    private var panelBackground: some View {
+        switch theme.panel {
+        case .material(let material): Rectangle().fill(material)
+        case .flat(let color): Rectangle().fill(color)
+        }
     }
 
     // MARK: - Promo Banner
@@ -241,34 +255,34 @@ struct MainMenuView: View {
 
     private var headerView: some View {
         HStack(spacing: 10) {
-            Image(systemName: "brain.head.profile")
+            Image(systemName: hub.activeProvider.iconName)
                 .font(.title2)
-                .foregroundStyle(.brand)
+                .foregroundStyle(theme.accent)
 
             VStack(alignment: .leading, spacing: 3) {
-                if let account = appState.activeAccount {
+                if let header = hub.surface.header {
                     HStack(spacing: 6) {
-                        Text(account.effectiveDisplayName(obfuscated: !showFullEmail))
+                        Text(header.title)
                             .font(.headline)
-                        if let sub = account.displaySubscriptionType {
-                            Badge(text: sub, color: .brand)
+                        if let plan = header.planBadge {
+                            Badge(text: plan, color: theme.accent)
                         }
                     }
-                    Text(account.displayEmail(obfuscated: !showFullEmail))
+                    Text(header.subtitle)
                         .font(.caption)
-                        .foregroundStyle(.textSecondary)
+                        .foregroundStyle(theme.textSecondary)
                 } else {
                     Text("CCSwitcher")
                         .font(.headline)
                     Text("No account connected")
                         .font(.caption)
-                        .foregroundStyle(.textSecondary)
+                        .foregroundStyle(theme.textSecondary)
                 }
             }
 
             Spacer()
 
-            if appState.isLoading {
+            if hub.surface.isLoading {
                 ProgressView()
                     .controlSize(.small)
             }
@@ -283,8 +297,8 @@ struct MainMenuView: View {
         ZStack {
             // Background capsule
             Capsule()
-                .fill(.tabFill)
-                .overlay(Capsule().stroke(.tabBorder, lineWidth: 1))
+                .fill(theme.tabFill)
+                .overlay(Capsule().stroke(theme.tabBorder, lineWidth: 1))
 
             // Sliding indicator
             GeometryReader { geo in
@@ -292,7 +306,7 @@ struct MainMenuView: View {
                 let tabWidth = geo.size.width / count
                 let index = CGFloat(Tab.allCases.firstIndex(of: selectedTab) ?? 0)
                 Capsule()
-                    .fill(Color.brand)
+                    .fill(theme.tabSelectedFill)
                     .padding(2)
                     .frame(width: tabWidth)
                     .offset(x: tabWidth * index)
@@ -310,7 +324,7 @@ struct MainMenuView: View {
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 6)
-                    .foregroundStyle(selectedTab == tab ? .white : .textSecondary)
+                    .foregroundStyle(selectedTab == tab ? theme.tabSelectedForeground : theme.textSecondary)
                     .contentShape(Rectangle())
                     .onTapGesture {
                         withAnimation(.easeInOut(duration: 0.15)) {
@@ -329,20 +343,20 @@ struct MainMenuView: View {
 
     private var footerView: some View {
         HStack {
-            if let error = appState.errorMessage {
+            if let error = hub.surface.errorMessage {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
                     .font(.caption)
                 Text(error)
                     .font(.caption2)
-                    .foregroundStyle(.textSecondary)
+                    .foregroundStyle(theme.textSecondary)
                     .lineLimit(1)
             }
 
             Spacer()
 
             Button {
-                Task { await appState.refresh(force: true) }
+                Task { await hub.refreshActive(force: true) }
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .font(.caption)

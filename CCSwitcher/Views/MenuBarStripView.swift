@@ -20,7 +20,7 @@ struct MenuBarStripView: View {
     // Not @ObservedObject: in the NSStatusItem hosting context, ObservableObject
     // change delivery is unreliable (only @State / timer re-render the hosted
     // view). We poll on a short interval instead.
-    let appState: AppState
+    let hub: ProviderHub
     let config: MenuBarConfig
     let onWidth: (CGFloat) -> Void
     @AppStorage("showFullEmail") private var showFullEmail = false
@@ -41,7 +41,7 @@ struct MenuBarStripView: View {
             ForEach(config.modules) { module in
                 MenuBarModuleView(
                     module: module,
-                    appState: appState,
+                    hub: hub,
                     showFullEmail: showFullEmail,
                     tick: tick
                 )

@@ -33,7 +33,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // onto the status item so the leading icon / trailing module never clip
         // when content widens (real data, longer countdowns, account name).
         let strip = MenuBarStripView(
-            appState: appState,
+            hub: hub,
             config: config,
             onWidth: { [weak statusItem] width in
                 statusItem?.length = max(width, 1)
@@ -96,7 +96,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         guard let appState, let providerHub, let config = menuBarConfig else { return }
         stripController?.rootView = AnyView(
             MenuBarStripView(
-                appState: appState,
+                hub: providerHub,
                 config: config,
                 onWidth: { [weak statusItem] width in
                     statusItem?.length = max(width, 1)

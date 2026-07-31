@@ -5,7 +5,7 @@ import SwiftUI
 /// percentages) or a value text (for absolute numbers / times) on the bottom.
 struct MenuBarModuleView: View {
     let module: MenuBarModule
-    let appState: AppState
+    let hub: ProviderHub
     let showFullEmail: Bool
     /// Tick value that recomputes reset countdowns once a minute.
     /// Passed in (and ignored by non-countdown modules) so the parent timer
@@ -88,38 +88,35 @@ struct MenuBarModuleView: View {
 
     // MARK: - Data accessors
 
+    private var activeCard: UsageCardModel? {
+        hub.surface.accountCards.first { $0.isActive } ?? hub.surface.accountCards.first
+    }
+
+    private func window(_ kind: UsageWindowModel.Kind) -> UsageWindowModel? {
+        activeCard?.windows.first { $0.kind == kind }
+    }
+
     private var accountText: String {
-        guard let account = appState.activeAccount else { return "—" }
-        let name = account.effectiveDisplayName(obfuscated: !showFullEmail)
-        return name.isEmpty ? "—" : name
+        guard let card = activeCard else { return "—" }
+        return card.title.isEmpty ? "—" : card.title
     }
 
-    private var sessionUtilization: Double? {
-        guard let id = appState.activeAccount?.id else { return nil }
-        return appState.accountUsage[id]?.fiveHour?.utilization
-    }
+    private var sessionUtilization: Double? { window(.session)?.utilization }
 
-    private var weeklyUtilization: Double? {
-        guard let id = appState.activeAccount?.id else { return nil }
-        return appState.accountUsage[id]?.sevenDay?.utilization
-    }
+    private var weeklyUtilization: Double? { window(.weekly)?.utilization }
 
     private var sessionTimeElapsed: Double? {
         _ = tick // recompute as the window progresses
-        guard let id = appState.activeAccount?.id else { return nil }
-        return appState.accountUsage[id]?.fiveHour?
-            .elapsedPercent(windowSeconds: RateLimitWindow.fiveHourSeconds)
+        return window(.session)?.elapsedPercent
     }
 
     private var weeklyTimeElapsed: Double? {
         _ = tick
-        guard let id = appState.activeAccount?.id else { return nil }
-        return appState.accountUsage[id]?.sevenDay?
-            .elapsedPercent(windowSeconds: RateLimitWindow.sevenDaySeconds)
+        return window(.weekly)?.elapsedPercent
     }
 
     private var dailyCostText: String {
-        let cost = appState.costSummary.todayCost
+        let cost = hub.surface.cost.todayCost
         guard cost > 0 else { return "—" }
         return String(format: "$%.2f", cost)
     }
@@ -127,20 +124,12 @@ struct MenuBarModuleView: View {
     private var sessionResetText: String {
         // `tick` is read so SwiftUI recomputes on each timer fire.
         _ = tick
-        guard let id = appState.activeAccount?.id,
-              let s = appState.accountUsage[id]?.fiveHour?.compactResetString else {
-            return "—"
-        }
-        return s
+        return UsageWindowFormat.compactResetText(until: window(.session)?.resetsAt) ?? "—"
     }
 
     private var weeklyResetText: String {
         _ = tick
-        guard let id = appState.activeAccount?.id,
-              let s = appState.accountUsage[id]?.sevenDay?.compactResetString else {
-            return "—"
-        }
-        return s
+        return UsageWindowFormat.compactResetText(until: window(.weekly)?.resetsAt) ?? "—"
     }
 }
 
