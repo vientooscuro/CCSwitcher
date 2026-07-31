@@ -1959,7 +1959,9 @@ for label, headers in variants.items():
 PY
 ```
 
-Use the smallest variant that returns 200 in Step 2's `makeRequest`. Record the result in a comment there so a future failure is diagnosable.
+**This shell probe returns 403 for every variant, including an unauthenticated GET to `https://chatgpt.com/`.** Verified: Cloudflare blocks `curl` and `urllib` on client TLS fingerprint alone, returning `Cf-Mitigated: challenge`. It says nothing about headers. Re-run the same three variants through `URLSession` (a standalone `swift` script works) — that is the stack the app actually uses, and all three return 200 there, including `Authorization` alone.
+
+So: auth-only is sufficient. The implementation still sends `chatgpt-account-id` and an honest `CCSwitcher/<version>` user agent, because they scope the request unambiguously and cost nothing. `originator: codex_cli_rs` is never needed. Record this in a comment in `makeRequest` so a future 403 is diagnosed as a fingerprint problem rather than a header regression.
 
 - [ ] **Step 2: Write the implementation**
 
