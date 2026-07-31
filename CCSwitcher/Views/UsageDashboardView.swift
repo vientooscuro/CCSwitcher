@@ -217,7 +217,11 @@ struct UsageDashboardView: View {
                 noticeRow(icon: "info.circle", tint: .orange, text: Text(notice))
             }
         }
-        .cardStyle(fill: card.isActive ? theme.cardFillStrong : theme.cardFill, border: theme.cardBorder)
+        // The pre-migration code read `account.isActive ? .cardFill : .cardFill`,
+        // i.e. the active account got no emphasis. Kept identical so this stage
+        // changes no pixels; giving the active card `cardFillStrong` is a
+        // reasonable improvement but belongs in its own change.
+        .cardStyle(fill: theme.cardFill, border: theme.cardBorder)
         .sectionPadding()
     }
 
