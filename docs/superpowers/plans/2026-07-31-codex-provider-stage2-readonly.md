@@ -994,7 +994,10 @@ final class OpenAICostTests: XCTestCase {
     func testOpenAIRouterPrefixResolves() async {
         let service = PricingService.shared
         await service.ensureLoaded()
-        XCTAssertNotNil(await service.pricing(for: "gpt-5.6"))
+        // Bind first: `await` inside XCTAssertNotNil's autoclosure does not
+        // compile under this project's strict-concurrency setting.
+        let pricing = await service.pricing(for: "gpt-5.6")
+        XCTAssertNotNil(pricing)
     }
 }
 ```
