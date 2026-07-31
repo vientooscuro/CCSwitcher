@@ -2226,11 +2226,23 @@ git commit -m "Render menu bar and popover chrome from provider hub"
 
 - [ ] **Step 1: Confirm no view still reads AppState directly**
 
+The four popover-surface views must be clean. Two other files legitimately keep `appState` and are excluded:
+
 ```bash
-grep -rn "appState\." CCSwitcher/Views/ || echo "clean"
+grep -rn "appState\." CCSwitcher/Views/ \
+  | grep -v "SettingsView.swift" \
+  | grep -v "ClaudeCLITabView.swift" \
+  || echo "clean"
 ```
 
-Expected: `clean`. `StatusItemController` legitimately still retains `appState` (it passes it into the environment for compatibility), so it is excluded from this check.
+Expected: `clean`.
+
+Why those two are excluded rather than migrated:
+
+- `ClaudeCLITabView` is a **Claude-specific** settings tab — it manages the `claude` binary and its auth. It has no provider-agnostic meaning, and Stage 2 gives Codex its own separate tab rather than generalizing this one.
+- `SettingsView` calls `appState.startAutoRefresh(interval:)`. That timer is global app behaviour, not per-provider display state, so routing it through `ProviderSurface` would put a scheduling concern into a display protocol.
+
+`StatusItemController` also still retains `appState`, because it injects it into the environment for those Settings views.
 
 - [ ] **Step 2: Run the whole suite**
 
