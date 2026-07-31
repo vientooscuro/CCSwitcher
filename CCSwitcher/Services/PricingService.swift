@@ -55,6 +55,24 @@ struct LiteLLMModelPricing: Sendable {
         guard let hi, hi > 0, tokens > 200_000 else { return n * rate }
         return 200_000 * rate + (n - 200_000) * hi
     }
+
+    /// OpenAI-shaped accounting, which differs from Anthropic's in three ways
+    /// that all bite:
+    ///   1. `inputTokens` is inclusive of `cachedInputTokens`, so the cached
+    ///      part must be subtracted before applying the fresh-input rate.
+    ///   2. `outputTokens` already includes reasoning tokens — the caller must
+    ///      not add `reasoning_output_tokens` separately.
+    ///   3. Cache writes are free and the counter is zero in practice; a
+    ///      non-zero value bills at the creation rate when the model defines one.
+    /// No 200k tier and no fast multiplier apply to OpenAI models.
+    func openAICost(inputTokens: Int, cachedInputTokens: Int, cacheWriteTokens: Int, outputTokens: Int) -> Double {
+        let cached = min(max(cachedInputTokens, 0), max(inputTokens, 0))
+        let fresh = max(inputTokens, 0) - cached
+        return Double(fresh) * inputPerToken
+            + Double(cached) * cacheReadPerToken
+            + Double(max(cacheWriteTokens, 0)) * cacheCreatePerToken
+            + Double(max(outputTokens, 0)) * outputPerToken
+    }
 }
 
 /// Source of the currently-loaded pricing table. Surfaced in logs and in
@@ -163,10 +181,11 @@ actor PricingService {
     /// Floor between network revalidations; guards against manual-refresh
     /// storms. The CDN caches for 5 min, so sub-minute rechecks see nothing new.
     private static let minCheckInterval: TimeInterval = 60
-    /// A usable LiteLLM payload yields dozens of Claude pricing rows (~44 at
-    /// time of writing). Anything below this floor means the bytes parsed as
-    /// JSON but aren't the pricing table — reject rather than trust them.
+    /// A usable LiteLLM payload yields dozens of rows per provider family.
+    /// Below these floors the bytes parsed as JSON but are not the pricing
+    /// table, so the payload is rejected rather than trusted.
     private static let minClaudeModels = 10
+    private static let minOpenAIModels = 10
     private static let liteLLMURL = URL(string:
         "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
     )!
@@ -237,7 +256,7 @@ actor PricingService {
     /// should treat those as zero-cost.
     func pricing(for model: String) -> LiteLLMModelPricing? {
         if let exact = pricing[model] { return exact }
-        for prefix in ["anthropic/", "anthropic."] {
+        for prefix in ["anthropic/", "anthropic.", "openai/"] {
             if let v = pricing[prefix + model] { return v }
         }
         // Fuzzy: longest prefix match in either direction. Handles dated
@@ -312,8 +331,8 @@ actor PricingService {
             case 200:
                 // Require a usable pricing table, not just valid JSON, before
                 // replacing the cache — a wrong-schema 200 must not zero prices.
-                guard let models = Self.claudeModels(from: data), models.count >= Self.minClaudeModels else {
-                    log.warning("conditionalRefresh: 200 body not a usable pricing table (claude rows=\(Self.claudeModels(from: data)?.count ?? -1)), keeping previous cache")
+                guard let models = Self.providerModels(from: data) else {
+                    log.warning("conditionalRefresh: 200 body not a usable pricing table, keeping previous cache")
                     return
                 }
                 try data.write(to: Self.freshURL, options: .atomic)
@@ -387,25 +406,38 @@ actor PricingService {
         let verifiedAt = loadMeta().map { Date(timeIntervalSince1970: $0.verifiedAt) } ?? mtime
         guard Date().timeIntervalSince(verifiedAt) < Self.freshValiditySeconds,
               let data = try? Data(contentsOf: Self.freshURL),
-              let models = Self.claudeModels(from: data),
-              models.count >= Self.minClaudeModels
+              let models = Self.providerModels(from: data)
         else {
             return nil
         }
         return LoadedFresh(models: models, fetchedAt: mtime)
     }
 
-    /// Decode a raw LiteLLM payload (the on-disk/network shape, not our
-    /// envelope) into Claude pricing rows — the same filter `fetch_litellm.sh`
-    /// applies at build time. Returns nil when the bytes aren't the expected
-    /// object-of-entries schema, so callers can reject a wrong-shape 200 body.
-    private static func claudeModels(from data: Data) -> [String: LiteLLMModelPricing]? {
+    /// Decode a raw LiteLLM payload into the rows CCSwitcher prices: Claude for
+    /// the Claude Code provider, gpt-5.x / codex / o-series for Codex. Returns
+    /// nil when the bytes are not the expected object-of-entries schema, or when
+    /// either family is too sparse to be a real pricing table.
+    private static func providerModels(from data: Data) -> [String: LiteLLMModelPricing]? {
         guard let raw = try? JSONDecoder().decode([String: LiteLLMEntry].self, from: data) else { return nil }
-        let claude = raw.filter { name, _ in
-            name.hasPrefix("claude-")
-                || name.hasPrefix("anthropic/claude-")
-                || name.hasPrefix("anthropic.claude-")
-        }
-        return claude.compactMapValues { $0.toPricing() }
+
+        let claude = raw.filter { name, _ in isClaude(name) }
+        let openAI = raw.filter { name, _ in isOpenAICodex(name) }
+        guard claude.count >= minClaudeModels, openAI.count >= minOpenAIModels else { return nil }
+
+        return claude.merging(openAI) { lhs, _ in lhs }.compactMapValues { $0.toPricing() }
+    }
+
+    private static func isClaude(_ name: String) -> Bool {
+        name.hasPrefix("claude-")
+            || name.hasPrefix("anthropic/claude-")
+            || name.hasPrefix("anthropic.claude-")
+    }
+
+    private static func isOpenAICodex(_ name: String) -> Bool {
+        let bare = name.split(separator: "/").last.map(String.init) ?? name
+        return bare.hasPrefix("gpt-5")
+            || bare.hasPrefix("codex-")
+            || bare.hasPrefix("o3")
+            || bare.hasPrefix("o4")
     }
 }

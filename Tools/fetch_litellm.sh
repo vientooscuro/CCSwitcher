@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fetch_litellm.sh — Pull the latest LiteLLM model-pricing JSON, filter it
-# down to Claude rows, and write the result into CCSwitcher/Resources/ so
-# it bundles with the app.
+# down to Claude and OpenAI (Codex) rows, and write the result into
+# CCSwitcher/Resources/ so it bundles with the app.
 #
 # Run this before tagging a release. The result is committed to the repo
 # so end-users never need to fetch over the network on first launch.
@@ -43,7 +43,17 @@ def is_claude(name: str) -> bool:
             or name.startswith('anthropic.claude-')
             or name.startswith('anthropic/claude-'))
 
-claude = {k: v for k, v in data.items() if is_claude(k)}
+def is_openai_codex(name: str) -> bool:
+    # Models Codex can actually run. Chat-only and embedding rows are excluded
+    # to keep the bundled snapshot small; anything Codex selects is a gpt-5.x,
+    # codex-*, or o-series id.
+    bare = name.split('/')[-1]
+    return (bare.startswith('gpt-5')
+            or bare.startswith('codex-')
+            or bare.startswith('o3')
+            or bare.startswith('o4'))
+
+claude = {k: v for k, v in data.items() if is_claude(k) or is_openai_codex(k)}
 
 # Wrap in an envelope so consumers know the provenance.
 wrapped = {
