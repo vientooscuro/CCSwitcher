@@ -353,7 +353,7 @@ xcodegen generate
 xcodebuild test -project CCSwitcher.xcodeproj -scheme CCSwitcher -destination 'platform=macOS' -only-testing:CCSwitcherTests/CodexAuthTests 2>&1 | tail -20
 ```
 
-Expected: `** TEST SUCCEEDED **`, 11 tests.
+Expected: `** TEST SUCCEEDED **`, 10 tests.
 
 - [ ] **Step 6: Commit**
 
@@ -874,7 +874,7 @@ xcodegen generate
 xcodebuild test -project CCSwitcher.xcodeproj -scheme CCSwitcher -destination 'platform=macOS' -only-testing:CCSwitcherTests/CodexUsageMappingTests 2>&1 | tail -20
 ```
 
-Expected: `** TEST SUCCEEDED **`, 14 tests.
+Expected: `** TEST SUCCEEDED **`. Count the tests in the file and report the real number.
 
 If the fixture is not found, verify with:
 
@@ -1203,7 +1203,7 @@ xcodegen generate
 xcodebuild test -project CCSwitcher.xcodeproj -scheme CCSwitcher -destination 'platform=macOS' -only-testing:CCSwitcherTests/OpenAICostTests 2>&1 | tail -20
 ```
 
-Expected: `** TEST SUCCEEDED **`, 9 tests.
+Expected: `** TEST SUCCEEDED **`. Count the tests in the file and report the real number.
 
 - [ ] **Step 7: Confirm Claude costs did not move**
 
@@ -1627,7 +1627,7 @@ xcodegen generate
 xcodebuild test -project CCSwitcher.xcodeproj -scheme CCSwitcher -destination 'platform=macOS' -only-testing:CCSwitcherTests/CodexRolloutParserTests 2>&1 | tail -20
 ```
 
-Expected: `** TEST SUCCEEDED **`, 11 tests.
+Expected: `** TEST SUCCEEDED **`, 10 tests.
 
 Note the `defer { previous = cumulative }` placement: it must run even on the `break` paths so the baseline advances. If a test shows inflated deltas, that defer is the first thing to check.
 
@@ -2660,7 +2660,7 @@ git commit -m "Add provider switcher and register Codex state"
 xcodebuild test -project CCSwitcher.xcodeproj -scheme CCSwitcher -destination 'platform=macOS' 2>&1 | tail -30
 ```
 
-Expected: `** TEST SUCCEEDED **` across all eight test classes.
+Expected: `** TEST SUCCEEDED **` across every test class. Report the real total.
 
 - [ ] **Step 2: Confirm nothing writes to ~/.codex**
 
