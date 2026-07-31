@@ -313,8 +313,12 @@ enum UsageWindowFormat {
         let remaining = date.timeIntervalSinceNow
         guard remaining > 0 else { return "now" }
 
-        let hours = Int(remaining) / 3600
-        let minutes = (Int(remaining) % 3600) / 60
+        // Round rather than truncate: the wall-clock time elapsed between the
+        // caller computing `date` and this call always makes `remaining`
+        // slightly less than intended, which truncation would round down.
+        let totalSeconds = Int(remaining.rounded())
+        let hours = totalSeconds / 3600
+        let minutes = (totalSeconds % 3600) / 60
 
         if hours > 24 { return Formatters.weekdayTime.string(from: date) }
         if hours > 0 { return "\(hours) hr \(minutes) min" }
@@ -325,8 +329,10 @@ enum UsageWindowFormat {
     /// "now", "5m", "2h 14m", "4d 6h". Never returns an absolute date.
     static func compactResetText(until date: Date?) -> String? {
         guard let date else { return nil }
-        let remaining = Int(date.timeIntervalSinceNow)
-        guard remaining > 0 else { return "now" }
+        let raw = date.timeIntervalSinceNow
+        guard raw > 0 else { return "now" }
+        // Rounded for the same reason as `resetText`.
+        let remaining = Int(raw.rounded())
 
         let days = remaining / 86_400
         let hours = (remaining % 86_400) / 3600
@@ -2202,6 +2208,16 @@ Expected: `** TEST SUCCEEDED **` with all four test classes reporting.
 - [ ] **Step 3: Side-by-side visual check**
 
 Build the branch, screenshot each of the three tabs plus the menu bar strip, then check out `main`, build, and screenshot the same four surfaces. Compare. Any difference in numbers, colours, spacing or badge text is a regression to fix before moving to stage 2.
+
+**One difference is expected and is not a regression.** `UsageWindowFormat.resetText` rounds to the nearest second, whereas the `UsageWindow.resetTimeString` it replaces truncated. A countdown may therefore read one minute higher than the old build at the same instant — for example "Resets in 25 min" where the old build said "24 min". Rounding is the more accurate rendering and is what the Task 2 tests pin. Only treat a countdown difference as a regression if it exceeds one minute.
+
+Task 13's migration leaves `UsageWindow.resetTimeString`, `compactResetString` and `elapsedPercent(windowSeconds:)` in `UsageData.swift` with no remaining callers. Confirm that with a search and delete the dead ones, so two implementations of the same countdown cannot drift apart:
+
+```bash
+grep -rn "resetTimeString\|compactResetString\|elapsedPercent(windowSeconds" CCSwitcher/ CCSwitcherWidget/ Shared/
+```
+
+Anything still referenced from the widget target must stay.
 
 ```bash
 xcodebuild -project CCSwitcher.xcodeproj -scheme CCSwitcher -configuration Debug build 2>&1 | tail -3
