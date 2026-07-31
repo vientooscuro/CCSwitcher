@@ -18,6 +18,8 @@ final class ProviderHub: ObservableObject {
 
     private var surfaces: [AIProviderType: any ProviderSurface]
     private var forwarders: [AnyCancellable] = []
+    private var periodicRefreshTimer: Timer?
+    private var periodicRefreshInterval: TimeInterval = 300
 
     private static let persistenceKey = "activeProvider"
 
@@ -55,12 +57,37 @@ final class ProviderHub: ObservableObject {
         UserDefaults.standard.set(provider.rawValue, forKey: Self.persistenceKey)
         log.info("[select] active=\(provider.rawValue)")
         Task { await surfaces[provider]?.refresh(force: false) }
+        startPeriodicRefresh(interval: periodicRefreshInterval)
     }
 
     /// Refresh only the visible provider. Polling a provider the user is not
     /// looking at spends CPU and, worse, rate-limit budget.
     func refreshActive(force: Bool) async {
         await surface.refresh(force: force)
+    }
+
+    /// Periodic refresh for the active provider. Claude has its own timer in
+    /// `AppState` (it also feeds the widget), so this only runs for other
+    /// providers — refreshing Claude here as well would double every fetch
+    /// against a rate-limited endpoint.
+    func startPeriodicRefresh(interval: TimeInterval) {
+        periodicRefreshInterval = interval
+        stopPeriodicRefresh()
+        guard activeProvider != .claudeCode else { return }
+
+        // `withTimeInterval:repeats:` does not fire immediately — `select(_:)`
+        // already kicks its own one-off refresh, so an immediate fire here
+        // would double that first fetch.
+        periodicRefreshTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.refreshActive(force: false)
+            }
+        }
+    }
+
+    func stopPeriodicRefresh() {
+        periodicRefreshTimer?.invalidate()
+        periodicRefreshTimer = nil
     }
 
     private func installForwarders() {

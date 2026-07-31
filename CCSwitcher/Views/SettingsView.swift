@@ -4,6 +4,7 @@ import ServiceManagement
 /// Settings window for configuring the app.
 struct SettingsView: View {
     @EnvironmentObject private var appState: AppState
+    @EnvironmentObject private var providerHub: ProviderHub
     @EnvironmentObject private var updateChecker: UpdateChecker
     @AppStorage("refreshInterval") private var refreshInterval: Double = 300
     @AppStorage("showFullEmail") private var showFullEmail = false
@@ -52,6 +53,7 @@ struct SettingsView: View {
                 }
                 .onChange(of: refreshInterval) { _, newValue in
                     appState.startAutoRefresh(interval: newValue)
+                    providerHub.startPeriodicRefresh(interval: newValue)
                 }
             }
 

@@ -75,6 +75,7 @@ struct CCSwitcherApp: App {
                     Task {
                         await appState.refresh()
                         appState.startAutoRefresh(interval: refreshInterval)
+                        providerHub.startPeriodicRefresh(interval: refreshInterval)
                         // Claude is refreshed unconditionally above because the
                         // widget and its auto-refresh timer depend on it. The
                         // active provider also needs a first load, or launching
