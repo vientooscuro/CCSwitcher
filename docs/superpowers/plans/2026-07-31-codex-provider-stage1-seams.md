@@ -1181,6 +1181,14 @@ extension AppState: ProviderSurface {
 
     // MARK: - Actions
 
+    /// `refresh(knownStatus:force:)` does not witness this requirement: a
+    /// defaulted parameter does not satisfy a protocol signature that omits it.
+    /// Verified — without this the build fails with "protocol requires function
+    /// 'refresh(force:)'". `loginNewAccount()` needs no witness; it already matches.
+    func refresh(force: Bool) async {
+        await refresh(knownStatus: nil, force: force)
+    }
+
     func switchTo(accountId: UUID) async {
         guard let account = accounts.first(where: { $0.id == accountId }) else { return }
         await switchTo(account)
@@ -1237,7 +1245,7 @@ Expected: `** TEST SUCCEEDED **`.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add CCSwitcher/Claude/ClaudeProviderSurface.swift CCSwitcher/AppState.swift
+git add CCSwitcher/Claude/ClaudeProviderSurface.swift CCSwitcher/AppState.swift CCSwitcher/Services/KeychainService.swift
 git commit -m "Conform AppState to ProviderSurface"
 ```
 
