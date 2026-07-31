@@ -28,6 +28,11 @@ struct SettingsView: View {
                     Label("Claude CLI", systemImage: "terminal")
                 }
 
+            CodexCLITabView()
+                .tabItem {
+                    Label("Codex CLI", systemImage: "chevron.left.forwardslash.chevron.right")
+                }
+
             aboutTab
                 .tabItem {
                     Label("About", systemImage: "info.circle")
