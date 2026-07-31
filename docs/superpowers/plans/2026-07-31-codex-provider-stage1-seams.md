@@ -2114,11 +2114,21 @@ git commit -m "Render account switcher from provider display models"
 
 Keep whatever surrounding formatting the originals applied (for example a `$`-stripping or truncation step in `dailyCostText` / `accountText`); only the data source changes.
 
-Change the view's `appState` declaration to `hub`. Note the existing comment at `MenuBarStripView.swift:20` warning that `ObservableObject` observation is unreliable inside the `NSStatusItem` hosting context — whatever mechanism that file uses today to receive updates must now be pointed at `ProviderHub` instead of `AppState`. Read that file before editing:
+**Do not use `@EnvironmentObject` here.** The menu-bar strip is not an ordinary view. `MenuBarStripView` takes `let appState: AppState` as a plain stored property and re-renders on a 3-second `Timer.publish`, and its own comment explains why: inside the `NSStatusItem` hosting context, `ObservableObject` change delivery is unreliable, so only `@State` or a timer actually redraws the hosted view. `StatusItemController` accordingly injects no environment object into the strip at all — verified: it passes `appState` and `config` through `MenuBarStripView`'s initializer. Switching the strip to `@EnvironmentObject` would both crash (no object in that environment) and break the polling that keeps countdowns current.
+
+So thread the hub through the initializer, exactly as `appState` is threaded today:
+
+1. In `MenuBarStripView`, replace `let appState: AppState` with `let hub: ProviderHub`, keeping the existing explanatory comment above it, and pass `hub: hub` down to `MenuBarModuleView` instead of `appState: appState`.
+2. In `MenuBarModuleView`, replace its `appState` stored property with `let hub: ProviderHub` and rewrite the data accessors as below.
+3. In `StatusItemController`, update **both** `MenuBarStripView(...)` construction sites — one in `install(...)`, one in `updateLocale(_:)` — to pass the hub. The controller already stores it as `providerHub` from Task 9.
+
+Read the file before editing so you match its existing shape:
 
 ```bash
 cat CCSwitcher/Views/MenuBarStripView.swift
 ```
+
+Because the strip polls rather than observes, a provider switch will not restyle it until the next tick (up to 3 seconds). That is acceptable and matches how the strip already lags other state; do not add machinery to fix it in this task.
 
 - [ ] **Step 2: Migrate the popover header and footer**
 
@@ -2179,7 +2189,7 @@ and add:
     }
 ```
 
-The same `.environment(\.providerTheme, hub.theme)` injection must be applied where `MenuBarStripView` is hosted in `StatusItemController.install`, since the strip is a separate view tree.
+The strip needs the theme too, but **not** via `.environment(\.providerTheme, …)` at its hosting site: that value would be captured once when the `AnyView` is built and would not follow a later provider switch, because the strip is never re-created. Since the strip already holds the hub as a stored property, read `hub.theme` directly wherever a module needs a colour. The 3-second tick then picks up a provider switch on its own.
 
 - [ ] **Step 4: Verify it builds and the strip still updates**
 
