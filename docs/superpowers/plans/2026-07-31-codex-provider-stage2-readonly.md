@@ -1704,7 +1704,11 @@ actor CodexSessionCache {
 
     /// Bump whenever the parser's output changes meaning, so cached aggregates
     /// computed by the old logic are discarded rather than trusted.
-    private static let currentVersion = 2
+    /// v2: the parser matched `custom_tool_call` on the event envelope instead of
+    /// inside `payload`, so every cached `linesAdded` was zero.
+    /// v3: usage seen before a file's first `turn_context` was attributed to an
+    /// "unknown" model, which showed a bogus row and priced those tokens at zero.
+    private static let currentVersion = 3
 
     private var files: [String: CodexRolloutAggregate] = [:]
     private var loaded = false

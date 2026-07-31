@@ -9,6 +9,10 @@ struct CodexTokenTotals: Codable, Sendable {
     var cacheWriteTokens: Int = 0
     var outputTokens: Int = 0
 
+    /// Input plus output. `inputTokens` already contains the cached portion, so
+    /// adding it again would double-count.
+    var totalBillableTokens: Int { inputTokens + outputTokens }
+
     static func + (lhs: CodexTokenTotals, rhs: CodexTokenTotals) -> CodexTokenTotals {
         CodexTokenTotals(
             inputTokens: lhs.inputTokens + rhs.inputTokens,

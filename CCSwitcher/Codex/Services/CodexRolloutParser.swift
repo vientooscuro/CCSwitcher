@@ -20,7 +20,13 @@ enum CodexRolloutParser {
         var aggregate = CodexRolloutAggregate()
         aggregate.mtime = mtime
 
-        var currentModel = "unknown"
+        // Nil until the first `turn_context`. A resumed session emits
+        // `token_count` before its first `turn_context`, so usage seen while
+        // this is nil is buffered in `pendingByDate` and attributed to the
+        // first model the file names — attributing it to a placeholder instead
+        // put an "unknown" row in the UI and priced those tokens at zero.
+        var currentModel: String?
+        var pendingByDate: [String: CodexTokenTotals] = [:]
         // Baseline for delta accounting. `total_token_usage` is cumulative per
         // session and was strictly monotonic across 23063 real events, so
         // differencing it is exact. Summing `last_token_usage` instead
@@ -46,6 +52,14 @@ enum CodexRolloutParser {
             switch event["type"] as? String {
             case "turn_context":
                 if let model = payload?["model"] as? String, !model.isEmpty {
+                    if currentModel == nil, !pendingByDate.isEmpty {
+                        for (day, buffered) in pendingByDate {
+                            var models = aggregate.tokens[day] ?? [:]
+                            models[model] = (models[model] ?? CodexTokenTotals()) + buffered
+                            aggregate.tokens[day] = models
+                        }
+                        pendingByDate = [:]
+                    }
                     currentModel = model
                 }
 
@@ -74,6 +88,10 @@ enum CodexRolloutParser {
                     let day = Formatters.isoDay.string(from: timestamp)
                     let delta = difference(cumulative, minus: base)
                     guard let delta else { break }             // regression: rebase silently
+                    guard let currentModel else {
+                        pendingByDate[day] = (pendingByDate[day] ?? CodexTokenTotals()) + delta
+                        break
+                    }
                     var models = aggregate.tokens[day] ?? [:]
                     models[currentModel] = (models[currentModel] ?? CodexTokenTotals()) + delta
                     aggregate.tokens[day] = models
@@ -99,6 +117,14 @@ enum CodexRolloutParser {
             default:
                 break
             }
+        }
+
+        if !pendingByDate.isEmpty {
+            // No `turn_context` anywhere in the file, so the model is genuinely
+            // unknowable and the tokens cannot be priced. Dropping them is
+            // better than inventing a model or surfacing an "unknown" row.
+            let dropped = pendingByDate.values.reduce(0) { $0 + $1.totalBillableTokens }
+            log.warning("parse: \(relativePath) has no turn_context, dropping \(dropped) unattributable tokens")
         }
 
         for (day, stamps) in timestampsByDate {
