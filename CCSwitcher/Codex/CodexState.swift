@@ -320,6 +320,16 @@ final class CodexState: ObservableObject, ProviderSurface {
     }
 
     private func reconcileActiveAccount(with auth: CodexAuth) async {
+        // First run, or an upgrade from a build that fabricated the account:
+        // adopt whoever Codex is signed in as. Requiring an explicit "Add
+        // current account" click here would show an empty popover to a user who
+        // is plainly signed in, which is what the Claude side already avoids by
+        // auto-creating its first account in `updateActiveAccount`.
+        if accounts.isEmpty {
+            await adoptCurrentAccount(auth: auth, reason: "no accounts stored yet")
+            return
+        }
+
         guard let activeId = accounts.first(where: \.isActive)?.id else {
             desyncNotice = nil
             return
@@ -355,6 +365,38 @@ final class CodexState: ObservableObject, ProviderSurface {
     // MARK: - Actions
 
     /// Adopt whichever account `~/.codex/auth.json` is currently signed in as.
+    /// Create a record for whoever `auth.json` currently belongs to and make it
+    /// active. Deliberately does NOT call `refresh` — it runs from inside one,
+    /// and re-entering would recurse.
+    @discardableResult
+    private func adoptCurrentAccount(auth: CodexAuth, reason: String) async -> Bool {
+        let claims = CodexAuthService.claims(fromIDToken: auth.tokens.idToken)
+        guard let email = claims?.email else {
+            log.warning("[adopt] no email in id_token claims, cannot adopt (\(reason))")
+            return false
+        }
+        guard let authText = CodexAuthWriter.read(at: CodexAuthService.authPath) else {
+            log.warning("[adopt] could not read auth.json text (\(reason))")
+            return false
+        }
+
+        let account = Account(
+            email: email,
+            displayName: claims?.name ?? email,
+            provider: .codex,
+            subscriptionType: claims?.planType,
+            isActive: true
+        )
+        accounts = accounts.map { var a = $0; a.isActive = false; return a }
+        accounts.append(account)
+        _ = await accountStore.saveBackup(authText, forAccountId: account.id.uuidString)
+        CodexAccountRegistry.save(accounts)
+        await refreshBackupPresence()
+        desyncNotice = nil
+        log.info("[adopt] adopted \(email) (\(reason)), total=\(accounts.count)")
+        return true
+    }
+
     func importCurrentAccount() async {
         guard isAvailable else {
             errorMessage = String(localized: "Codex is not signed in on this Mac.", bundle: L10n.bundle)
