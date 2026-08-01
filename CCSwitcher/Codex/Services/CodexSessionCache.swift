@@ -23,7 +23,12 @@ actor CodexSessionCache {
     /// inside `payload`, so every cached `linesAdded` was zero.
     /// v3: usage seen before a file's first `turn_context` was attributed to an
     /// "unknown" model, which showed a bogus row and priced those tokens at zero.
-    private static let currentVersion = 3
+    /// v4: a resumed session's rollout file replays every earlier `token_count`
+    /// event, so summing each file's own per-file totals across a session's
+    /// files multiplied shared history by the number of files. Cached files now
+    /// carry raw `tokenObservations` instead, deduplicated across a session's
+    /// files before being turned into deltas.
+    private static let currentVersion = 4
 
     private var files: [String: CodexRolloutAggregate] = [:]
     private var loaded = false
@@ -117,38 +122,40 @@ actor CodexSessionCache {
     /// rates into one answer.
     func costSeries() async -> CostSeriesModel {
         ensureLoaded()
+        let tokensByDayAndModel = Self.mergedTokensByDayAndModel(from: Array(files.values))
 
-        // `sessions` counts distinct rollout files contributing to a date — one
-        // file is one Codex session, matching what the Claude side reports.
+        // `sessions` counts distinct rollout files with any usage on a date —
+        // one file is one Codex session, matching what the Claude side reports.
+        // Unaffected by the session-aware dedup below: it's a file count, not a
+        // token sum.
         var byDate: [String: (cost: Double, models: [String: Double], totals: CodexTokenTotals, sessions: Int)] = [:]
-        var modelIds: Set<String> = []
         for aggregate in files.values {
-            for (_, models) in aggregate.tokens { modelIds.formUnion(models.keys) }
+            for day in Set(aggregate.tokenObservationRuns.map(\.day)) {
+                byDate[day, default: (0, [:], CodexTokenTotals(), 0)].sessions += 1
+            }
         }
+
+        var modelIds: Set<String> = []
+        for (_, models) in tokensByDayAndModel { modelIds.formUnion(models.keys) }
 
         let pricingService = PricingService.shared
         await pricingService.ensureLoaded()
         let prices = await pricingService.prices(for: Array(modelIds))
 
-        for aggregate in files.values {
-            for (date, models) in aggregate.tokens {
-                var entry = byDate[date] ?? (0, [:], CodexTokenTotals(), 0)
-                // One file contributing to this date is one session, counted once
-                // regardless of how many models it used.
-                entry.sessions += 1
-                for (model, totals) in models {
-                    let cost = (prices[model] ?? nil)?.openAICost(
-                        inputTokens: totals.inputTokens,
-                        cachedInputTokens: totals.cachedInputTokens,
-                        cacheWriteTokens: totals.cacheWriteTokens,
-                        outputTokens: totals.outputTokens
-                    ) ?? 0
-                    entry.cost += cost
-                    entry.models[model, default: 0] += cost
-                    entry.totals = entry.totals + totals
-                }
-                byDate[date] = entry
+        for (date, models) in tokensByDayAndModel {
+            var entry = byDate[date] ?? (0, [:], CodexTokenTotals(), 0)
+            for (model, totals) in models {
+                let cost = (prices[model] ?? nil)?.openAICost(
+                    inputTokens: totals.inputTokens,
+                    cachedInputTokens: totals.cachedInputTokens,
+                    cacheWriteTokens: totals.cacheWriteTokens,
+                    outputTokens: totals.outputTokens
+                ) ?? 0
+                entry.cost += cost
+                entry.models[model, default: 0] += cost
+                entry.totals = entry.totals + totals
             }
+            byDate[date] = entry
         }
 
         let today = Formatters.isoDay.string(from: Date())
@@ -170,6 +177,55 @@ actor CodexSessionCache {
         return CostSeriesModel(todayCost: byDate[today]?.cost ?? 0, daily: daily)
     }
 
+    /// Deltas per day and model, deduplicated across every rollout file of the
+    /// same session. A resumed or subagent file replays earlier `token_count`
+    /// events verbatim, so naively summing each file's own per-file totals (as
+    /// this used to do) multiplies shared history by however many files the
+    /// session has — one real session measured 44 files sharing one
+    /// `session_id`, inflating a day's tokens by roughly 24x.
+    ///
+    /// A free function of the aggregates rather than a method reading `files`,
+    /// so it's directly unit-testable without touching the on-disk cache.
+    /// Static members of an actor aren't actor-isolated, so this needs no await.
+    static func mergedTokensByDayAndModel(from aggregates: [CodexRolloutAggregate]) -> [String: [String: CodexTokenTotals]] {
+        var bySession: [String: [CodexTokenObservation]] = [:]
+        for (index, aggregate) in aggregates.enumerated() {
+            // An aggregate without a session_id (shouldn't happen, but parsing
+            // is best-effort) falls back to a key unique to it, i.e. no
+            // cross-file merge — the same as today's behavior for that file.
+            let flattened = aggregate.tokenObservationRuns.flatMap { run in
+                run.cumulatives.map { CodexTokenObservation(day: run.day, model: run.model, cumulative: $0) }
+            }
+            bySession[aggregate.sessionId ?? "unkeyed-\(index)", default: []].append(contentsOf: flattened)
+        }
+
+        var result: [String: [String: CodexTokenTotals]] = [:]
+        for observations in bySession.values {
+            // Two files of the same session see identical cumulative snapshots
+            // for shared history — dedup on the snapshot itself, then sort by
+            // its magnitude to recover the session-wide chronology before
+            // diffing. (Sorting by magnitude rather than timestamp is safe here
+            // because a session's counter only ever grows; per-file timestamp
+            // handling for the rare within-file counter reset stays in
+            // `CodexRolloutParser`.)
+            var seen: Set<CodexTokenTotals> = []
+            let unique = observations
+                .filter { seen.insert($0.cumulative).inserted }
+                .sorted { $0.cumulative.totalBillableTokens < $1.cumulative.totalBillableTokens }
+
+            var previous: CodexTokenTotals?
+            for observation in unique {
+                defer { previous = observation.cumulative }
+                guard let base = previous,
+                      let delta = CodexRolloutParser.difference(observation.cumulative, minus: base) else { continue }
+                var models = result[observation.day] ?? [:]
+                models[observation.model] = (models[observation.model] ?? CodexTokenTotals()) + delta
+                result[observation.day] = models
+            }
+        }
+        return result
+    }
+
     /// Today's activity. Per-file active minutes are summed, which means
     /// parallel sessions stack — the same approximation the Claude parser makes
     /// and the same one the UI tooltip already describes.
@@ -186,11 +242,11 @@ actor CodexSessionCache {
             turns += aggregate.turns[today] ?? 0
             minutes += aggregate.activeMinutes[today] ?? 0
             lines += aggregate.linesAdded[today] ?? 0
-            for (model, totals) in aggregate.tokens[today] ?? [:] {
-                // Output tokens are the closest Codex analogue to "how much did
-                // this model actually produce today".
-                perModelTokens[model, default: 0] += totals.outputTokens
-            }
+        }
+        for (model, totals) in Self.mergedTokensByDayAndModel(from: Array(files.values))[today] ?? [:] {
+            // Output tokens are the closest Codex analogue to "how much did
+            // this model actually produce today".
+            perModelTokens[model, default: 0] += totals.outputTokens
         }
 
         let entries = perModelTokens

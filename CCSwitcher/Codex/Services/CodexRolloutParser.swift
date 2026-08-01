@@ -33,6 +33,21 @@ enum CodexRolloutParser {
         // overshoots by roughly 6% because streaming repeats events.
         var previous: CodexTokenTotals?
         var timestampsByDate: [String: [Date]] = [:]
+        // Raw cumulative snapshots, buffered the same way as `pendingByDate`
+        // until the model is known, then flushed. Kept independent of the
+        // delta bookkeeping above because cross-file dedup (CodexSessionCache)
+        // needs the cumulative value itself, not this file's own delta.
+        var pendingObservations: [(day: String, cumulative: CodexTokenTotals)] = []
+        var runs: [CodexTokenObservationRun] = []
+        // Collapses consecutive same-day/same-model snapshots into one run
+        // instead of one entry per event — see `CodexTokenObservationRun`.
+        func recordObservation(day: String, model: String, cumulative: CodexTokenTotals) {
+            if let last = runs.indices.last, runs[last].day == day, runs[last].model == model {
+                runs[last].cumulatives.append(cumulative)
+            } else {
+                runs.append(CodexTokenObservationRun(day: day, model: model, cumulatives: [cumulative]))
+            }
+        }
 
         for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
             guard let lineData = line.data(using: .utf8),
@@ -50,6 +65,11 @@ enum CodexRolloutParser {
             }
 
             switch event["type"] as? String {
+            case "session_meta":
+                if let sessionId = payload?["session_id"] as? String {
+                    aggregate.sessionId = sessionId
+                }
+
             case "turn_context":
                 if let model = payload?["model"] as? String, !model.isEmpty {
                     if currentModel == nil, !pendingByDate.isEmpty {
@@ -59,6 +79,12 @@ enum CodexRolloutParser {
                             aggregate.tokens[day] = models
                         }
                         pendingByDate = [:]
+                    }
+                    if currentModel == nil, !pendingObservations.isEmpty {
+                        for pending in pendingObservations {
+                            recordObservation(day: pending.day, model: model, cumulative: pending.cumulative)
+                        }
+                        pendingObservations = []
                     }
                     currentModel = model
                 }
@@ -83,9 +109,17 @@ enum CodexRolloutParser {
                           let raw = info["total_token_usage"] as? [String: Any],
                           let timestamp else { break }
                     let cumulative = totals(fromTotalUsage: raw)
+                    let day = Formatters.isoDay.string(from: timestamp)
+                    // Record the raw snapshot regardless of delta bookkeeping —
+                    // even the event that sets this file's own baseline may be
+                    // mid-session from the session's point of view.
+                    if let currentModel {
+                        recordObservation(day: day, model: currentModel, cumulative: cumulative)
+                    } else {
+                        pendingObservations.append((day: day, cumulative: cumulative))
+                    }
                     defer { previous = cumulative }
                     guard let base = previous else { break }   // first event only sets the baseline
-                    let day = Formatters.isoDay.string(from: timestamp)
                     let delta = difference(cumulative, minus: base)
                     guard let delta else { break }             // regression: rebase silently
                     guard let currentModel else {
@@ -131,6 +165,10 @@ enum CodexRolloutParser {
             aggregate.activeMinutes[day] = activeMinutes(stamps)
         }
 
+        // pendingObservations left over here shares the same fate as
+        // pendingByDate above: no turn_context ever appeared, so it's dropped.
+        aggregate.tokenObservationRuns = runs
+
         return aggregate
     }
 
@@ -167,7 +205,8 @@ enum CodexRolloutParser {
 
     /// Nil when any counter went backwards, which means the session's counter
     /// restarted. The caller rebases instead of recording negative usage.
-    private static func difference(_ current: CodexTokenTotals, minus base: CodexTokenTotals) -> CodexTokenTotals? {
+    /// Not private: `CodexSessionCache` reuses it for its cross-file merge.
+    static func difference(_ current: CodexTokenTotals, minus base: CodexTokenTotals) -> CodexTokenTotals? {
         guard current.inputTokens >= base.inputTokens,
               current.cachedInputTokens >= base.cachedInputTokens,
               current.cacheWriteTokens >= base.cacheWriteTokens,
