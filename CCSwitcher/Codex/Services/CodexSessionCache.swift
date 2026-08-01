@@ -2,6 +2,14 @@ import Foundation
 
 private let log = FileLog("CodexCache")
 
+/// One day's turns/lines/active-minutes, already deduplicated across a
+/// session's replayed rollout files. See `CodexSessionCache.mergedActivityByDay`.
+struct CodexActivityTotals: Sendable {
+    var turns: Int = 0
+    var linesAdded: Int = 0
+    var activeMinutes: Int = 0
+}
+
 /// Incrementally aggregates `~/.codex/sessions/**/rollout-*.jsonl`.
 ///
 /// A real install measured 940 files totalling 2 GB, so re-reading the tree on
@@ -28,7 +36,13 @@ actor CodexSessionCache {
     /// files multiplied shared history by the number of files. Cached files now
     /// carry raw `tokenObservations` instead, deduplicated across a session's
     /// files before being turned into deltas.
-    private static let currentVersion = 4
+    /// v5: `turns`, `linesAdded` and `activeMinutes` had the same defect as
+    /// tokens above — a replayed rollout file's `task_started`/`apply_patch`
+    /// events and its every-event timestamps were summed per file instead of
+    /// deduplicated per session. Cached files now carry the raw
+    /// `turnTimestampsByDay`/`patchEventsByDay`/`activeMinuteBucketsByDay`
+    /// needed to dedup those, same shape as v4's token fix.
+    private static let currentVersion = 5
 
     private var files: [String: CodexRolloutAggregate] = [:]
     private var loaded = false
@@ -226,23 +240,69 @@ actor CodexSessionCache {
         return result
     }
 
-    /// Today's activity. Per-file active minutes are summed, which means
-    /// parallel sessions stack — the same approximation the Claude parser makes
-    /// and the same one the UI tooltip already describes.
+    /// Turns, added lines and active minutes, deduplicated across every
+    /// rollout file of the same session — the same fix as
+    /// `mergedTokensByDayAndModel`, for the same reason: a resumed or
+    /// subagent file replays every earlier `task_started`/`apply_patch`/event
+    /// timestamp verbatim, so summing each file's own per-file counters (as
+    /// this used to do) multiplies shared history by however many files the
+    /// session has.
+    ///
+    /// A free function of the aggregates for the same testability reason as
+    /// `mergedTokensByDayAndModel`.
+    static func mergedActivityByDay(from aggregates: [CodexRolloutAggregate]) -> [String: CodexActivityTotals] {
+        struct SessionDay {
+            var turnStamps: Set<Double> = []
+            var patchLinesById: [String: Int] = [:]
+            var activeMinuteBuckets: Set<Int> = []
+        }
+
+        var bySession: [String: [String: SessionDay]] = [:]
+        for (index, aggregate) in aggregates.enumerated() {
+            let sessionKey = aggregate.sessionId ?? "unkeyed-\(index)"
+            var days = bySession[sessionKey] ?? [:]
+
+            for (day, stamps) in aggregate.turnTimestampsByDay {
+                days[day, default: SessionDay()].turnStamps.formUnion(stamps)
+            }
+            for (day, events) in aggregate.patchEventsByDay {
+                var entry = days[day] ?? SessionDay()
+                for event in events { entry.patchLinesById[event.id] = event.lines }
+                days[day] = entry
+            }
+            for (day, buckets) in aggregate.activeMinuteBucketsByDay {
+                days[day, default: SessionDay()].activeMinuteBuckets.formUnion(buckets)
+            }
+
+            bySession[sessionKey] = days
+        }
+
+        var result: [String: CodexActivityTotals] = [:]
+        for days in bySession.values {
+            for (day, sessionDay) in days {
+                var totals = result[day] ?? CodexActivityTotals()
+                totals.turns += sessionDay.turnStamps.count
+                totals.linesAdded += sessionDay.patchLinesById.values.reduce(0, +)
+                // Minute buckets stand in for exact timestamps here — see
+                // `activeMinuteBucketsByDay` — so gaps are computed between
+                // bucket starts rather than raw event times.
+                let bucketDates = sessionDay.activeMinuteBuckets
+                    .map { Date(timeIntervalSince1970: Double($0) * 60) }
+                totals.activeMinutes += CodexRolloutParser.activeMinutes(bucketDates)
+                result[day] = totals
+            }
+        }
+        return result
+    }
+
+    /// Today's activity, deduplicated per session across replayed rollout files.
     func activityToday() -> ActivitySummaryModel {
         ensureLoaded()
         let today = Formatters.isoDay.string(from: Date())
 
-        var turns = 0
-        var minutes = 0
-        var lines = 0
+        let activity = Self.mergedActivityByDay(from: Array(files.values))[today] ?? CodexActivityTotals()
         var perModelTokens: [String: Int] = [:]
 
-        for aggregate in files.values {
-            turns += aggregate.turns[today] ?? 0
-            minutes += aggregate.activeMinutes[today] ?? 0
-            lines += aggregate.linesAdded[today] ?? 0
-        }
         for (model, totals) in Self.mergedTokensByDayAndModel(from: Array(files.values))[today] ?? [:] {
             // Output tokens are the closest Codex analogue to "how much did
             // this model actually produce today".
@@ -254,9 +314,9 @@ actor CodexSessionCache {
             .map { ModelUsageEntry(displayName: $0.key, count: $0.value, tint: CodexDisplayMapper.tint(forModel: $0.key)) }
 
         return ActivitySummaryModel(
-            turns: turns,
-            activeTimeText: Self.durationText(minutes: minutes),
-            linesWritten: lines,
+            turns: activity.turns,
+            activeTimeText: Self.durationText(minutes: activity.activeMinutes),
+            linesWritten: activity.linesAdded,
             perModel: entries
         )
     }

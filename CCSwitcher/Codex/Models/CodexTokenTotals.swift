@@ -73,6 +73,32 @@ struct CodexTokenObservationRun: Codable, Sendable {
     var cumulatives: [CodexTokenTotals]
 }
 
+/// One `apply_patch` tool call. `id` is the event's `call_id` where present —
+/// a resumed or subagent file replays the same `call_id` verbatim for shared
+/// history, making it a far better cross-file dedup key than a timestamp.
+/// Falls back to a timestamp+line-count key for the rare event without one,
+/// so replays of that event still dedup, just less precisely.
+struct CodexPatchEvent: Sendable {
+    var id: String
+    var lines: Int
+}
+
+extension CodexPatchEvent: Codable {
+    // Unkeyed array, matching `CodexTokenTotals` — this can appear once per
+    // `apply_patch` call across ~1,000 rollout files.
+    init(from decoder: Decoder) throws {
+        var container = try decoder.unkeyedContainer()
+        id = try container.decode(String.self)
+        lines = try container.decode(Int.self)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.unkeyedContainer()
+        try container.encode(id)
+        try container.encode(lines)
+    }
+}
+
 /// Everything one rollout file contributes. Cached on disk keyed by path and
 /// mtime, so an unchanged file is never re-read.
 struct CodexRolloutAggregate: Codable, Sendable {
@@ -81,6 +107,9 @@ struct CodexRolloutAggregate: Codable, Sendable {
     /// every file of a resumed session double- (or n-times-) counts replayed
     /// history — `CodexSessionCache` uses `tokenObservationRuns` instead for that.
     var tokens: [String: [String: CodexTokenTotals]] = [:]
+    /// This file's own per-day counts, computed in isolation — see `tokens`
+    /// above for why these are unsafe to sum across a session's files.
+    /// `CodexSessionCache` uses the raw fields below instead.
     var turns: [String: Int] = [:]
     var linesAdded: [String: Int] = [:]
     var activeMinutes: [String: Int] = [:]
@@ -93,6 +122,20 @@ struct CodexRolloutAggregate: Codable, Sendable {
     /// information needed to recognize replayed history from another file of
     /// the same session.
     var tokenObservationRuns: [CodexTokenObservationRun] = []
+    /// `task_started` event timestamps (epoch seconds), by day. Two files of
+    /// the same session replay the same `task_started` verbatim, so the
+    /// timestamp — not this file's own count — is what `CodexSessionCache`
+    /// dedups on to recover the session's real turn count.
+    var turnTimestampsByDay: [String: [Double]] = [:]
+    /// `apply_patch` calls seen in this file, by day. `CodexSessionCache`
+    /// dedups on `CodexPatchEvent.id` across a session's files.
+    var patchEventsByDay: [String: [CodexPatchEvent]] = [:]
+    /// Every event's timestamp in this file, floored to the minute and
+    /// grouped by day, for `CodexSessionCache`'s cross-file active-time merge.
+    /// Minute resolution instead of every raw timestamp keeps this bounded —
+    /// one real session replayed ~117k timestamped events in a single day
+    /// across its files, which storing verbatim would multiply by file count.
+    var activeMinuteBucketsByDay: [String: [Int]] = [:]
     /// Newest `rate_limits` block seen in this file, for the offline fallback.
     var latestSnapshot: CodexRateLimitSnapshot?
     /// Timestamp of the newest event, used to pick the freshest file's snapshot.

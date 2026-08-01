@@ -39,6 +39,9 @@ enum CodexRolloutParser {
         // needs the cumulative value itself, not this file's own delta.
         var pendingObservations: [(day: String, cumulative: CodexTokenTotals)] = []
         var runs: [CodexTokenObservationRun] = []
+        var turnTimestampsByDay: [String: [Double]] = [:]
+        var patchEventsByDay: [String: [CodexPatchEvent]] = [:]
+        var activeMinuteBucketsByDay: [String: [Int]] = [:]
         // Collapses consecutive same-day/same-model snapshots into one run
         // instead of one entry per event — see `CodexTokenObservationRun`.
         func recordObservation(day: String, model: String, cumulative: CodexTokenTotals) {
@@ -61,6 +64,7 @@ enum CodexRolloutParser {
             if let timestamp {
                 let day = Formatters.isoDay.string(from: timestamp)
                 timestampsByDate[day, default: []].append(timestamp)
+                activeMinuteBucketsByDay[day, default: []].append(Int((timestamp.timeIntervalSince1970 / 60).rounded(.down)))
                 aggregate.latestEventAt = max(aggregate.latestEventAt, timestamp.timeIntervalSince1970)
             }
 
@@ -96,6 +100,7 @@ enum CodexRolloutParser {
                     if let timestamp {
                         let day = Formatters.isoDay.string(from: timestamp)
                         aggregate.turns[day, default: 0] += 1
+                        turnTimestampsByDay[day, default: []].append(timestamp.timeIntervalSince1970)
                     }
 
                 case "token_count":
@@ -146,7 +151,10 @@ enum CodexRolloutParser {
                       let input = payload["input"] as? String,
                       let timestamp else { break }
                 let day = Formatters.isoDay.string(from: timestamp)
-                aggregate.linesAdded[day, default: 0] += addedLineCount(inPatch: input)
+                let lines = addedLineCount(inPatch: input)
+                aggregate.linesAdded[day, default: 0] += lines
+                let id = (payload["call_id"] as? String) ?? "\(timestamp.timeIntervalSince1970)_\(lines)"
+                patchEventsByDay[day, default: []].append(CodexPatchEvent(id: id, lines: lines))
 
             default:
                 break
@@ -168,6 +176,11 @@ enum CodexRolloutParser {
         // pendingObservations left over here shares the same fate as
         // pendingByDate above: no turn_context ever appeared, so it's dropped.
         aggregate.tokenObservationRuns = runs
+        aggregate.turnTimestampsByDay = turnTimestampsByDay
+        aggregate.patchEventsByDay = patchEventsByDay
+        // Dedup within the file: a replay-heavy session only needs the union
+        // of these sets across files, not one entry per raw event.
+        aggregate.activeMinuteBucketsByDay = activeMinuteBucketsByDay.mapValues { Array(Set($0)).sorted() }
 
         return aggregate
     }
