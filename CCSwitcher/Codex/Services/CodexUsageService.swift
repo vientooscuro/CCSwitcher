@@ -25,7 +25,7 @@ actor CodexUsageService {
         var errorDescription: String? {
             switch self {
             case .needsReauth:
-                return String(localized: "Codex session expired. Run `codex login` to sign in again.", bundle: L10n.bundle)
+                return String(localized: "Codex session expired. Open this account in Codex and sign in again.", bundle: L10n.bundle)
             case .rateLimited:
                 return String(localized: "Codex API rate-limited. Retrying automatically.", bundle: L10n.bundle)
             case .transport(let detail):
@@ -36,7 +36,7 @@ actor CodexUsageService {
         }
     }
 
-    struct Result: Sendable {
+    struct Result: Codable, Sendable {
         let snapshot: CodexRateLimitSnapshot
         let email: String?
         /// True when the numbers came from a local rollout file rather than live.
@@ -46,17 +46,11 @@ actor CodexUsageService {
 
     private static let endpoint = URL(string: "https://chatgpt.com/backend-api/codex/usage")!
 
-    private static var lastKnownURL: URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support")
-        let dir = appSupport.appendingPathComponent("CCSwitcher", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("codex-usage-last-known.json")
-    }
+    private let cache = CodexUsageDiskCache()
 
     /// Live fetch with the given credentials. Throws rather than falling back,
     /// so the caller decides whether a stale local snapshot is acceptable.
-    func fetchLive(accessToken: String, accountId: String?) async throws -> Result {
+    func fetchLive(accessToken: String, accountId: String?, profileID: UUID) async throws -> Result {
         guard !CodexAuthService.isAccessTokenExpired(accessToken) else {
             log.warning("fetchLive: access token expired locally, not sending request")
             throw UsageError.needsReauth
@@ -87,7 +81,7 @@ actor CodexUsageService {
                 isStale: false,
                 observedAt: Date()
             )
-            persistLastKnown(result)
+            cache.save(result, profileID: profileID)
             log.info("fetchLive: ok, plan=\(decoded.planType ?? "?") windows=\(result.snapshot.windows.count)")
             return result
 
@@ -106,24 +100,9 @@ actor CodexUsageService {
         }
     }
 
-    /// Local fallback: the newest snapshot Codex wrote, or the last live answer
-    /// we persisted, whichever is newer. Used when the endpoint fails and to
-    /// populate the popover before the first fetch completes.
-    func localFallback() async -> Result? {
-        let fromRollouts = await CodexSessionCache.shared.latestLocalSnapshot()
-            .map { Result(snapshot: $0.snapshot, email: nil, isStale: true, observedAt: $0.observedAt) }
-        let fromCache = loadLastKnown()
-
-        switch (fromRollouts, fromCache) {
-        case (let rollout?, let cached?):
-            return rollout.observedAt >= cached.observedAt ? rollout : cached
-        case (let rollout?, nil):
-            return rollout
-        case (nil, let cached?):
-            return cached
-        case (nil, nil):
-            return nil
-        }
+    /// Unscoped legacy caches and rollout snapshots may belong to another account.
+    func localFallback(profileID: UUID) -> Result? {
+        cache.load(profileID: profileID)
     }
 
     // MARK: - Private
@@ -154,21 +133,30 @@ actor CodexUsageService {
         return request
     }
 
-    private struct LastKnown: Codable {
-        let snapshot: CodexRateLimitSnapshot
-        let email: String?
-        let observedAt: Date
+}
+
+struct CodexUsageDiskCache: Sendable {
+    let root: URL
+
+    init(root: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/CCSwitcher/CodexUsage")) {
+        self.root = root
     }
 
-    private func persistLastKnown(_ result: Result) {
-        let payload = LastKnown(snapshot: result.snapshot, email: result.email, observedAt: result.observedAt)
-        guard let data = try? JSONEncoder().encode(payload) else { return }
-        try? data.write(to: Self.lastKnownURL, options: .atomic)
+    func save(_ result: CodexUsageService.Result, profileID: UUID) {
+        guard let data = try? JSONEncoder().encode(result) else { return }
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            try data.write(to: url(for: profileID), options: .atomic)
+        } catch {
+            log.warning("Could not persist scoped usage cache")
+        }
     }
 
-    private func loadLastKnown() -> Result? {
-        guard let data = try? Data(contentsOf: Self.lastKnownURL),
-              let payload = try? JSONDecoder().decode(LastKnown.self, from: data) else { return nil }
-        return Result(snapshot: payload.snapshot, email: payload.email, isStale: true, observedAt: payload.observedAt)
+    func load(profileID: UUID) -> CodexUsageService.Result? {
+        guard let data = try? Data(contentsOf: url(for: profileID)),
+              let result = try? JSONDecoder().decode(CodexUsageService.Result.self, from: data) else { return nil }
+        return CodexUsageService.Result(snapshot: result.snapshot, email: result.email, isStale: true, observedAt: result.observedAt)
     }
+
+    private func url(for id: UUID) -> URL { root.appendingPathComponent("\(id.uuidString).json") }
 }

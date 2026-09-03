@@ -47,7 +47,7 @@ actor CodexSessionCache {
     private var files: [String: CodexRolloutAggregate] = [:]
     private var loaded = false
 
-    private static let cacheURL: URL = {
+    private static let defaultCacheURL: URL = {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support")
         let dir = appSupport.appendingPathComponent("CCSwitcher", isDirectory: true)
@@ -55,8 +55,12 @@ actor CodexSessionCache {
         return dir.appendingPathComponent("codex-session-cache.json")
     }()
 
-    private static var sessionsRoot: String {
-        (NSHomeDirectory() as NSString).appendingPathComponent(".codex/sessions")
+    private let sessionsRoot: String
+    private let cacheURL: URL
+
+    init(sessionsRoot: String = NSHomeDirectory() + "/.codex/sessions", cacheURL: URL? = nil) {
+        self.sessionsRoot = sessionsRoot
+        self.cacheURL = cacheURL ?? Self.defaultCacheURL
     }
 
     private struct ScanResult {
@@ -110,7 +114,7 @@ actor CodexSessionCache {
     func refreshFromFilesystem() async {
         ensureLoaded()
 
-        let root = Self.sessionsRoot
+        let root = sessionsRoot
         guard FileManager.default.fileExists(atPath: root) else {
             log.info("refresh: no sessions directory")
             return
@@ -339,7 +343,7 @@ actor CodexSessionCache {
     private func ensureLoaded() {
         guard !loaded else { return }
         loaded = true
-        guard let data = try? Data(contentsOf: Self.cacheURL),
+        guard let data = try? Data(contentsOf: cacheURL),
               let envelope = try? JSONDecoder().decode(Envelope.self, from: data),
               envelope.version == Self.currentVersion else {
             log.info("ensureLoaded: no usable cache, starting empty")
@@ -351,7 +355,7 @@ actor CodexSessionCache {
 
     private func save() {
         guard let data = try? JSONEncoder().encode(Envelope(version: Self.currentVersion, files: files)) else { return }
-        try? data.write(to: Self.cacheURL, options: .atomic)
+        try? data.write(to: cacheURL, options: .atomic)
     }
 
     private static func durationText(minutes: Int) -> String {

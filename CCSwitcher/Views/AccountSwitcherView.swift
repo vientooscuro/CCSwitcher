@@ -43,7 +43,7 @@ struct AccountSwitcherView: View {
             Text("No Accounts")
                 .font(.headline)
 
-            Text("Add your current Claude Code account to get started.")
+            Text(hub.activeProvider == .codex ? "Add a Codex desktop account to get started." : "Add your current Claude Code account to get started.")
                 .font(.caption)
                 .foregroundStyle(theme.textSecondary)
                 .multilineTextAlignment(.center)
@@ -129,14 +129,14 @@ struct AccountSwitcherView: View {
             Spacer()
 
             // Actions
-            if hub.surface.capabilities.canSwitchAccounts, !row.isActive {
-                Button("Switch") {
+            if hub.surface.capabilities.canSwitchAccounts, !row.isActive || hub.activeProvider == .codex {
+                Button(hub.activeProvider == .codex ? "Open Codex" : "Switch") {
                     Task { await hub.surface.switchTo(accountId: row.id) }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .tint(theme.accent)
-                .disabled(!row.hasStoredCredentials)
+                .disabled(!row.hasStoredCredentials || hub.surface.isAuthenticating || hub.surface.isLoading)
             }
 
             if hub.surface.capabilities.canReauthenticate {
@@ -186,13 +186,17 @@ struct AccountSwitcherView: View {
             VStack(spacing: 8) {
                 ProgressView()
                     .controlSize(.small)
-                Text("Waiting for browser login...")
+                Text(hub.activeProvider == .codex ? "Sign in inside the new Codex window." : "Waiting for browser login...")
                     .font(.caption)
                     .foregroundStyle(theme.textSecondary)
                 Text("Complete the login in your browser, then return here.")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .multilineTextAlignment(.center)
+                if let codex = hub.surface as? CodexState {
+                    Button("Stop waiting") { codex.cancelLogin() }
+                        .controlSize(.small)
+                }
             }
             .frame(maxWidth: .infinity)
             .padding(12)
@@ -205,7 +209,7 @@ struct AccountSwitcherView: View {
         } else if showingAddConfirm {
             // Inline confirmation for "Add Current"
             VStack(spacing: 8) {
-                Text("This will capture the currently logged-in Claude Code account.")
+                Text(hub.activeProvider == .codex ? "This will register the default Codex profile without copying its credentials." : "This will capture the currently logged-in Claude Code account.")
                     .font(.caption)
                     .foregroundStyle(theme.textSecondary)
                     .multilineTextAlignment(.center)
@@ -235,6 +239,12 @@ struct AccountSwitcherView: View {
             )
         } else {
             VStack(spacing: 8) {
+                if hub.activeProvider == .codex {
+                    Text("Each account opens its own Codex window. Other windows and terminal sessions keep their accounts. Older saved accounts need one fresh login.")
+                        .font(.caption2)
+                        .foregroundStyle(theme.textSecondary)
+                        .multilineTextAlignment(.center)
+                }
                 // Primary: Login new account via browser
                 if hub.surface.capabilities.canLoginNewAccount {
                     Button {

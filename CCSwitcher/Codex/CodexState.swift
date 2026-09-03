@@ -2,11 +2,7 @@ import SwiftUI
 
 private let log = FileLog("CodexState")
 
-/// Codex provider state. Stage 2 was read-only; stage 3 adds real per-account
-/// records, import, switching and the desync guard. `loginNewAccount()` and
-/// `reauthenticate(id:)` are implemented but kept behind `capabilities` —
-/// the user has exactly one ChatGPT account, and `codex login` would sign
-/// them out with nothing to fall back to.
+/// Desktop accounts keep independent live credentials; snapshots are never restored.
 @MainActor
 final class CodexState: ObservableObject, ProviderSurface {
 
@@ -43,28 +39,44 @@ final class CodexState: ObservableObject, ProviderSurface {
     private var rateLimitedUntil: Date?
 
     private let usageService = CodexUsageService.shared
-    private let sessionCache = CodexSessionCache.shared
-    private let accountStore = CodexAccountStore.shared
+    private var profileSessionCaches: [String: CodexSessionCache] = [:]
+    private let defaults: UserDefaults
+    let profiles: CodexDesktopProfiles
+    private let openDesktop: (CodexDesktopProfile) async throws -> Void
+    private var loginTask: Task<Void, Never>?
+    private var loginGeneration = UUID()
+    private static let pendingLoginKey = "codexDesktopPendingLoginID"
+    private static let pendingLoginPausedKey = "codexDesktopPendingLoginPaused"
 
-    init() {
-        accounts = CodexAccountRegistry.load()
-        Task { await refreshBackupPresence() }
+    init(
+        defaults: UserDefaults = .standard,
+        profiles: CodexDesktopProfiles? = nil,
+        openDesktop: @escaping (CodexDesktopProfile) async throws -> Void = CodexDesktopProfiles.open
+    ) {
+        self.defaults = defaults
+        self.profiles = profiles ?? CodexDesktopProfiles(defaults: defaults)
+        self.openDesktop = openDesktop
+        accounts = CodexAccountRegistry.load(from: defaults)
+    }
+
+    var selectedProfile: CodexDesktopProfile {
+        accounts.first(where: \.isActive).map { profiles.profile(for: $0.id) } ?? profiles.defaultProfile
+    }
+
+    var pendingLoginID: UUID? {
+        defaults.string(forKey: Self.pendingLoginKey).flatMap(UUID.init(uuidString:))
     }
 
     var providerType: AIProviderType { .codex }
 
-    var isAvailable: Bool { CodexAuthService.isInstalled }
+    var isAvailable: Bool { CodexDesktopProfiles.applicationURL != nil || !accounts.isEmpty }
 
     var capabilities: ProviderCapabilities {
         ProviderCapabilities(
             canSwitchAccounts: true,
             canImportCurrent: true,
-            // Implemented below, but the user has exactly one ChatGPT account
-            // right now: `codex login` would sign them out with no second
-            // account to fall back to. Keep the affordance hidden until there
-            // is a second account to switch to.
-            canLoginNewAccount: false,
-            canReauthenticate: false,
+            canLoginNewAccount: true,
+            canReauthenticate: true,
             managesAccounts: true,
             tracksLinesWritten: true
         )
@@ -116,7 +128,7 @@ final class CodexState: ObservableObject, ProviderSurface {
                 planBadge: account.displaySubscriptionType,
                 isActive: account.isActive,
                 lastUsedText: account.lastUsed.map { Formatters.monthDay.string(from: $0) },
-                hasStoredCredentials: accountsWithBackups.contains(account.id),
+                hasStoredCredentials: true,
                 rawLabel: account.customLabel
             )
         }
@@ -162,6 +174,12 @@ final class CodexState: ObservableObject, ProviderSurface {
     // MARK: - Refresh
 
     func refresh(force: Bool) async {
+        guard !isLoading else { return }
+        reconcileDefaultProfile()
+        refreshBackupPresence()
+        if pendingLoginID != nil, loginTask == nil, !defaults.bool(forKey: Self.pendingLoginPausedKey) {
+            observePendingLogin()
+        }
         guard isAvailable else {
             errorMessage = String(localized: "Codex is not signed in on this Mac.", bundle: L10n.bundle)
             return
@@ -174,9 +192,14 @@ final class CodexState: ObservableObject, ProviderSurface {
         // network is unavailable.
         let auth: CodexAuth?
         do {
-            let loaded = try CodexAuthService.loadCurrent()
+            let loaded = try Self.loadAuth(from: selectedProfile)
+            if let active = accounts.first(where: \.isActive),
+               CodexAuthService.claims(fromIDToken: loaded.tokens.idToken)?.email != active.email {
+                throw NSError(domain: "CodexDesktop", code: 2, userInfo: [
+                    NSLocalizedDescriptionKey: "This Codex profile is signed in to a different account. Open Codex and sign in to the expected account."
+                ])
+            }
             auth = loaded
-            await reconcileActiveAccount(with: loaded)
             let claims = CodexAuthService.claims(fromIDToken: loaded.tokens.idToken)
             email = claims?.email
             name = claims?.name
@@ -214,14 +237,15 @@ final class CodexState: ObservableObject, ProviderSurface {
         }
 
         do {
+            guard let profileID = accounts.first(where: \.isActive)?.id else { return }
             let result = try await usageService.fetchLive(
                 accessToken: auth.tokens.accessToken,
-                accountId: auth.tokens.accountId
+                accountId: auth.tokens.accountId,
+                profileID: profileID
             )
             snapshot = result.snapshot
             snapshotIsStale = false
             planType = result.snapshot.planType ?? planType
-            if let live = result.email { email = live }
             usageError = nil
             rateLimitedUntil = nil
         } catch CodexUsageService.UsageError.rateLimited(let retryAfter) {
@@ -251,15 +275,28 @@ final class CodexState: ObservableObject, ProviderSurface {
     }
 
     private func applyFallback() async {
-        guard let fallback = await usageService.localFallback() else { return }
+        guard let id = accounts.first(where: \.isActive)?.id,
+              let fallback = await usageService.localFallback(profileID: id) else { return }
         snapshot = fallback.snapshot
         snapshotIsStale = true
         planType = fallback.snapshot.planType ?? planType
-        if email == nil { email = fallback.email }
         log.info("[refresh] using local snapshot from \(fallback.observedAt)")
     }
 
     private func refreshCostAndActivity() async {
+        let profile = selectedProfile
+        let sessionCache: CodexSessionCache
+        if profile.isDefault {
+            sessionCache = .shared
+        } else if let cached = profileSessionCaches[profile.home.path] {
+            sessionCache = cached
+        } else {
+            sessionCache = CodexSessionCache(
+                sessionsRoot: profile.home.appendingPathComponent("sessions").path,
+                cacheURL: profile.home.appendingPathComponent("ccswitcher-session-cache.json")
+            )
+            profileSessionCaches[profile.home.path] = sessionCache
+        }
         await PricingService.shared.reloadIfFreshChanged()
         PricingService.shared.refreshInBackground()
         await sessionCache.refreshFromFilesystem()
@@ -280,7 +317,7 @@ final class CodexState: ObservableObject, ProviderSurface {
         accounts[index].email = email
         accounts[index].displayName = displayName
         accounts[index].subscriptionType = planType
-        CodexAccountRegistry.save(accounts)
+        CodexAccountRegistry.save(accounts, to: defaults)
     }
 
     // MARK: - Desync guard
@@ -319,283 +356,221 @@ final class CodexState: ObservableObject, ProviderSurface {
         accounts.contains { $0.email == email }
     }
 
-    private func reconcileActiveAccount(with auth: CodexAuth) async {
-        // First run, or an upgrade from a build that fabricated the account:
-        // adopt whoever Codex is signed in as. Requiring an explicit "Add
-        // current account" click here would show an empty popover to a user who
-        // is plainly signed in, which is what the Claude side already avoids by
-        // auto-creating its first account in `updateActiveAccount`.
-        if accounts.isEmpty {
-            await adoptCurrentAccount(auth: auth, reason: "no accounts stored yet")
+    static func loadAuth(from profile: CodexDesktopProfile) throws -> CodexAuth {
+        let data = try Data(contentsOf: profile.authURL)
+        return try CodexAuthService.decode(authJSON: data)
+    }
+
+    /// Migration binds the existing home in place; no credentials are copied.
+    func reconcileDefaultProfile() {
+        if let boundID = profiles.defaultAccountID, accounts.contains(where: { $0.id == boundID }) { return }
+        guard let auth = try? Self.loadAuth(from: profiles.defaultProfile),
+              let claims = CodexAuthService.claims(fromIDToken: auth.tokens.idToken),
+              let email = claims.email else { return }
+        let id: UUID
+        if profiles.defaultAccountID == nil, let existing = accounts.first(where: { $0.email == email }) {
+            guard !FileManager.default.fileExists(atPath: profiles.profile(for: existing.id).home.path) else {
+                desyncNotice = "The default Codex login matches an existing isolated profile. Its profile has not been changed."
+                return
+            }
+            id = existing.id
+        } else {
+            let account = Account(id: profiles.defaultAccountID ?? UUID(), email: email, displayName: claims.name ?? email, provider: .codex,
+                                  subscriptionType: claims.planType, isActive: true)
+            accounts.append(account)
+            id = account.id
+        }
+        profiles.bindDefault(to: id)
+        accounts = CodexAccountRegistry.markActive(id: id, in: accounts)
+        CodexAccountRegistry.save(accounts, to: defaults)
+    }
+
+    private func refreshBackupPresence() {
+        accountsWithBackups = Set(accounts.filter {
+            FileManager.default.fileExists(atPath: profiles.profile(for: $0.id).authURL.path)
+        }.map(\.id))
+    }
+
+    // MARK: - Desktop actions
+
+    func importCurrentAccount() async {
+        reconcileDefaultProfile()
+        if profiles.defaultAccountID == nil {
+            errorMessage = "Sign in to the default Codex app first, or use Login New Account."
             return
         }
+        await refresh(force: true)
+    }
 
-        guard let activeId = accounts.first(where: \.isActive)?.id else {
-            desyncNotice = nil
+    func loginNewAccount() async {
+        guard !isLoading, !isAuthenticating else { return }
+        reconcileDefaultProfile()
+        let id = pendingLoginID.flatMap { pending in accounts.contains(where: { $0.id == pending }) ? nil : pending } ?? UUID()
+        await openForLogin(id: id)
+    }
+
+    /// Opening a profile never replaces auth.json, even with a stored legacy backup.
+    func switchTo(accountId: UUID) async {
+        guard !isLoading, !isAuthenticating,
+              let target = accounts.first(where: { $0.id == accountId }) else { return }
+        reconcileDefaultProfile()
+        let profile = profiles.profile(for: accountId)
+        errorMessage = nil
+        isLoading = true
+        do {
+            try profiles.prepare(profile)
+            try await openDesktop(profile)
+        } catch {
+            isLoading = false
+            errorMessage = error.localizedDescription
             return
         }
-
-        var knownFingerprints: [UUID: String] = [:]
-        for account in accounts {
-            guard let text = await accountStore.backup(forAccountId: account.id.uuidString),
-                  let backupAuth = try? CodexAuthService.decode(authJSON: Data(text.utf8)) else { continue }
-            knownFingerprints[account.id] = CodexAuthService.fingerprint(for: backupAuth)
+        isLoading = false
+        guard let auth = try? Self.loadAuth(from: profile) else {
+            defaults.set(accountId.uuidString, forKey: Self.pendingLoginKey)
+            defaults.set(false, forKey: Self.pendingLoginPausedKey)
+            observePendingLogin()
+            return
         }
+        guard CodexAuthService.claims(fromIDToken: auth.tokens.idToken)?.email == target.email else {
+            errorMessage = "This profile is signed in to a different account. Sign in to the expected account in its Codex window."
+            return
+        }
+        selectAccount(accountId)
+        await refresh(force: true)
+    }
 
-        let liveFingerprint = CodexAuthService.fingerprint(for: auth)
-        switch Self.desyncDecision(liveFingerprint: liveFingerprint, activeAccountId: activeId, knownFingerprints: knownFingerprints) {
-        case .matches:
-            desyncNotice = nil
-        case .adopt(let id):
-            accounts = CodexAccountRegistry.markActive(id: id, in: accounts)
-            CodexAccountRegistry.save(accounts)
-            desyncNotice = nil
-            log.info("[reconcile] live auth.json now matches known account \(accounts.first { $0.id == id }?.email ?? "?"); switched active flag")
-        case .unknown:
-            desyncNotice = String(localized: "Codex is signed in as an account CCSwitcher does not know. Use Add current account to adopt it.", bundle: L10n.bundle)
-            log.warning("[reconcile] live auth.json fingerprint matches no known account")
+    func reauthenticate(id: UUID) async {
+        guard !isLoading, !isAuthenticating, accounts.contains(where: { $0.id == id }) else { return }
+        reconcileDefaultProfile()
+        let profile = profiles.profile(for: id)
+        guard (try? Self.loadAuth(from: profile)) != nil else {
+            await openForLogin(id: id)
+            return
+        }
+        isAuthenticating = true
+        let generation = UUID()
+        loginGeneration = generation
+        defer { if loginGeneration == generation { isAuthenticating = false } }
+        do {
+            try profiles.prepare(profile)
+            try await openDesktop(profile)
+            guard loginGeneration == generation else { return }
+            errorMessage = "To renew this account, sign out and sign in inside this Codex window. Other profiles are unchanged."
+        } catch {
+            guard loginGeneration == generation else { return }
+            errorMessage = error.localizedDescription
         }
     }
 
-    private func refreshBackupPresence() async {
-        let ids = await accountStore.backedUpAccountIds()
-        accountsWithBackups = Set(ids.compactMap(UUID.init(uuidString:)))
+    private func openForLogin(id: UUID) async {
+        let profile = profiles.profile(for: id)
+        errorMessage = nil
+        isAuthenticating = true
+        let generation = UUID()
+        loginGeneration = generation
+        do {
+            try profiles.prepare(profile)
+            defaults.set(id.uuidString, forKey: Self.pendingLoginKey)
+            defaults.set(false, forKey: Self.pendingLoginPausedKey)
+            try await openDesktop(profile)
+            guard loginGeneration == generation else { return }
+            observePendingLogin()
+        } catch {
+            guard loginGeneration == generation else { return }
+            isAuthenticating = false
+            defaults.set(true, forKey: Self.pendingLoginPausedKey)
+            errorMessage = error.localizedDescription
+        }
     }
 
-    // MARK: - Actions
+    private func observePendingLogin() {
+        guard let id = pendingLoginID, loginTask == nil else { return }
+        isAuthenticating = true
+        loginTask = Task { [weak self] in
+            for _ in 0..<300 {
+                guard !Task.isCancelled else { return }
+                if let self, !self.isLoading, self.acceptLoginIfReady(id: id) {
+                    self.isAuthenticating = false
+                    self.loginTask = nil
+                    await self.refresh(force: true)
+                    return
+                }
+                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+            }
+            guard let self else { return }
+            self.isAuthenticating = false
+            self.loginTask = nil
+            self.defaults.set(true, forKey: Self.pendingLoginPausedKey)
+            self.errorMessage = "Login is still pending. Use Login New Account to resume, or Open Codex for an existing account."
+        }
+    }
 
-    /// Adopt whichever account `~/.codex/auth.json` is currently signed in as.
-    /// Create a record for whoever `auth.json` currently belongs to and make it
-    /// active. Deliberately does NOT call `refresh` — it runs from inside one,
-    /// and re-entering would recurse.
+    /// Identity comes from the selected live profile, never a Keychain snapshot.
     @discardableResult
-    private func adoptCurrentAccount(auth: CodexAuth, reason: String) async -> Bool {
-        let claims = CodexAuthService.claims(fromIDToken: auth.tokens.idToken)
-        guard let email = claims?.email else {
-            log.warning("[adopt] no email in id_token claims, cannot adopt (\(reason))")
-            return false
+    func acceptLoginIfReady(id: UUID) -> Bool {
+        guard let auth = try? Self.loadAuth(from: profiles.profile(for: id)),
+              let claims = CodexAuthService.claims(fromIDToken: auth.tokens.idToken),
+              let email = claims.email else { return false }
+        if let existing = accounts.first(where: { $0.id == id }) {
+            guard existing.email == email else {
+                errorMessage = "Login did not match the expected account. Switch accounts inside that Codex window."
+                return false
+            }
+        } else {
+            guard !Self.wouldDuplicate(email: email, in: accounts) else {
+                errorMessage = "That account already exists. Sign in to the other account in the new Codex window."
+                return false
+            }
+            accounts.append(Account(id: id, email: email, displayName: claims.name ?? email,
+                                    provider: .codex, subscriptionType: claims.planType))
         }
-        guard let authText = CodexAuthWriter.read(at: CodexAuthService.authPath) else {
-            log.warning("[adopt] could not read auth.json text (\(reason))")
-            return false
-        }
-
-        let account = Account(
-            email: email,
-            displayName: claims?.name ?? email,
-            provider: .codex,
-            subscriptionType: claims?.planType,
-            isActive: true
-        )
-        accounts = accounts.map { var a = $0; a.isActive = false; return a }
-        accounts.append(account)
-        _ = await accountStore.saveBackup(authText, forAccountId: account.id.uuidString)
-        CodexAccountRegistry.save(accounts)
-        await refreshBackupPresence()
-        desyncNotice = nil
-        log.info("[adopt] adopted \(email) (\(reason)), total=\(accounts.count)")
+        defaults.removeObject(forKey: Self.pendingLoginKey)
+        defaults.removeObject(forKey: Self.pendingLoginPausedKey)
+        selectAccount(id)
+        refreshBackupPresence()
         return true
     }
 
-    func importCurrentAccount() async {
-        guard isAvailable else {
-            errorMessage = String(localized: "Codex is not signed in on this Mac.", bundle: L10n.bundle)
-            return
-        }
-
-        do {
-            let auth = try CodexAuthService.loadCurrent()
-            let claims = CodexAuthService.claims(fromIDToken: auth.tokens.idToken)
-            guard let email = claims?.email else {
-                errorMessage = String(localized: "Could not determine the signed-in account's email.", bundle: L10n.bundle)
-                log.error("[importCurrentAccount] Aborted: no email in id_token claims")
-                return
-            }
-            guard !Self.wouldDuplicate(email: email, in: accounts) else {
-                errorMessage = String(localized: "Account already exists", bundle: L10n.bundle)
-                log.warning("[importCurrentAccount] Aborted: duplicate account for \(email)")
-                return
-            }
-            guard let authText = CodexAuthWriter.read(at: CodexAuthService.authPath) else {
-                errorMessage = String(localized: "Could not read Codex credentials.", bundle: L10n.bundle)
-                log.error("[importCurrentAccount] Aborted: could not read auth.json text")
-                return
-            }
-
-            let account = Account(
-                email: email,
-                displayName: claims?.name ?? email,
-                provider: .codex,
-                subscriptionType: claims?.planType,
-                isActive: true
-            )
-            accounts = accounts.map { var a = $0; a.isActive = false; return a }
-            accounts.append(account)
-            _ = await accountStore.saveBackup(authText, forAccountId: account.id.uuidString)
-            CodexAccountRegistry.save(accounts)
-            await refreshBackupPresence()
-            log.info("[importCurrentAccount] Imported \(email) as new active account, total=\(accounts.count)")
-
-            await refresh(force: true)
-        } catch {
-            errorMessage = error.localizedDescription
-            log.error("[importCurrentAccount] Error: \(error.localizedDescription)")
-        }
+    func cancelLogin() {
+        loginGeneration = UUID()
+        loginTask?.cancel()
+        loginTask = nil
+        isAuthenticating = false
+        defaults.set(true, forKey: Self.pendingLoginPausedKey)
+        // Retain the pending profile so a completed login is recoverable after relaunch.
     }
 
-    /// Run `codex login`'s browser OAuth flow and add the result as a new
-    /// account. Implemented, but gated off by `capabilities.canLoginNewAccount`
-    /// until there is a second ChatGPT account to fall back to — this call
-    /// must never be exercised while that gate is closed.
-    func loginNewAccount() async {
-        isAuthenticating = true
-        errorMessage = nil
-        defer { isAuthenticating = false }
-
-        if let active = accounts.first(where: \.isActive), let liveText = CodexAuthWriter.read(at: CodexAuthService.authPath) {
-            _ = await accountStore.saveBackup(liveText, forAccountId: active.id.uuidString)
-        }
-
-        do {
-            try await CodexCLIService.shared.login()
-        } catch {
-            errorMessage = error.localizedDescription
-            log.error("[loginNewAccount] `codex login` failed: \(error.localizedDescription)")
-            return
-        }
-
-        await importCurrentAccount()
-        log.info("[loginNewAccount] Completed")
-    }
-
-    /// Backs up the live credential file to `target`, writes `target`'s stored
-    /// backup over it, and marks `target` active. The only path in this class
-    /// that writes `~/.codex/auth.json` — safe only because the bytes it
-    /// writes are a backup the app itself captured.
-    func switchTo(accountId: UUID) async {
-        guard let targetIndex = accounts.firstIndex(where: { $0.id == accountId }) else { return }
-        let target = accounts[targetIndex]
-
-        guard let targetBackupText = await accountStore.backup(forAccountId: target.id.uuidString) else {
-            errorMessage = String(localized: "No stored credentials for \(target.email). Use re-authenticate to fix.", bundle: L10n.bundle)
-            log.error("[switchTo] ABORT: no backup for \(target.email)")
-            return
-        }
-        guard (try? CodexAuthService.decode(authJSON: Data(targetBackupText.utf8))) != nil else {
-            errorMessage = String(localized: "Stored credentials for \(target.email) are corrupt. Re-authenticate to fix.", bundle: L10n.bundle)
-            log.error("[switchTo] ABORT: backup for \(target.email) does not parse as CodexAuth")
-            return
-        }
-
-        isLoading = true
-        errorMessage = nil
-        log.info("[switchTo] ===== Switching to \(target.email) =====")
-
-        // Back up the live file to the account we currently believe is
-        // active — but only if the live fingerprint still matches it (or no
-        // backup exists yet). If it has drifted, the user switched accounts
-        // inside Codex Desktop/CLI, and overwriting that account's backup
-        // with the wrong session would poison it for next time.
-        if let active = accounts.first(where: \.isActive) {
-            if let liveText = CodexAuthWriter.read(at: CodexAuthService.authPath),
-               let liveAuth = try? CodexAuthService.decode(authJSON: Data(liveText.utf8)) {
-                let liveFingerprint = CodexAuthService.fingerprint(for: liveAuth)
-                let backupFingerprint = await accountStore.backup(forAccountId: active.id.uuidString)
-                    .flatMap { try? CodexAuthService.decode(authJSON: Data($0.utf8)) }
-                    .map(CodexAuthService.fingerprint(for:))
-                if backupFingerprint == nil || liveFingerprint == backupFingerprint {
-                    _ = await accountStore.saveBackup(liveText, forAccountId: active.id.uuidString)
-                } else {
-                    log.warning("[switchTo] live auth.json no longer matches \(active.email); skipping backup overwrite")
-                }
-            }
-        }
-
-        guard CodexAuthWriter.write(targetBackupText, to: CodexAuthService.authPath) else {
-            errorMessage = String(localized: "Could not write Codex credentials.", bundle: L10n.bundle)
-            isLoading = false
-            log.error("[switchTo] write failed for \(target.email)")
-            return
-        }
-
-        accounts = CodexAccountRegistry.markActive(id: target.id, in: accounts)
-        if let updatedIndex = accounts.firstIndex(where: { $0.id == target.id }) {
-            accounts[updatedIndex].lastUsed = Date()
-        }
-        CodexAccountRegistry.save(accounts)
+    private func selectAccount(_ id: UUID) {
+        accounts = CodexAccountRegistry.markActive(id: id, in: accounts)
+        if let index = accounts.firstIndex(where: { $0.id == id }) { accounts[index].lastUsed = Date() }
+        CodexAccountRegistry.save(accounts, to: defaults)
+        snapshot = accountSnapshots[id]
+        snapshotIsStale = snapshot != nil
+        email = nil
+        name = nil
+        planType = nil
         usageError = nil
         desyncNotice = nil
-        log.info("[switchTo] ===== Switch completed =====")
-
-        isLoading = false
-        await refresh(force: true)
+        rateLimitedUntil = nil
+        costSeries = .empty
+        activitySummary = .empty
     }
 
-    /// Drops the registry row and the store entry. If this was the active
-    /// account, the live `auth.json` is left untouched — only the bookkeeping
-    /// flag is cleared. Deleting a user's live credentials because they
-    /// removed a row would be indefensible.
     func removeAccount(id: UUID) {
-        guard let account = accounts.first(where: { $0.id == id }) else { return }
-        log.info("[removeAccount] Removing \(account.email) (active=\(account.isActive))")
+        guard !isAuthenticating, !isLoading else { return }
         accounts.removeAll { $0.id == id }
         accountSnapshots[id] = nil
-        CodexAccountRegistry.save(accounts)
-        Task {
-            await accountStore.removeBackup(forAccountId: id.uuidString)
-            await refreshBackupPresence()
-        }
-        log.info("[removeAccount] Done. Remaining accounts: \(accounts.count)")
-    }
-
-    /// Runs `codex login` and, only if the resulting session matches
-    /// `target`'s email, refreshes its stored backup. Implemented, but gated
-    /// off by `capabilities.canReauthenticate` for the same reason as
-    /// `loginNewAccount()` — must never be exercised while that gate is closed.
-    func reauthenticate(id: UUID) async {
-        guard let index = accounts.firstIndex(where: { $0.id == id }) else { return }
-        let target = accounts[index]
-
-        isAuthenticating = true
-        errorMessage = nil
-        defer { isAuthenticating = false }
-
-        if let active = accounts.first(where: \.isActive), active.id != target.id,
-           let liveText = CodexAuthWriter.read(at: CodexAuthService.authPath) {
-            _ = await accountStore.saveBackup(liveText, forAccountId: active.id.uuidString)
-        }
-
-        do {
-            try await CodexCLIService.shared.login()
-        } catch {
-            errorMessage = error.localizedDescription
-            log.error("[reauthenticate] `codex login` failed: \(error.localizedDescription)")
-            return
-        }
-
-        guard let auth = try? CodexAuthService.loadCurrent(),
-              let email = CodexAuthService.claims(fromIDToken: auth.tokens.idToken)?.email,
-              email == target.email else {
-            errorMessage = String(localized: "Login did not match the expected account.", bundle: L10n.bundle)
-            log.error("[reauthenticate] post-login email did not match \(target.email)")
-            return
-        }
-
-        guard let liveText = CodexAuthWriter.read(at: CodexAuthService.authPath) else { return }
-        _ = await accountStore.saveBackup(liveText, forAccountId: target.id.uuidString)
-        accounts = CodexAccountRegistry.markActive(id: target.id, in: accounts)
-        CodexAccountRegistry.save(accounts)
-        await refreshBackupPresence()
-        log.info("[reauthenticate] Refreshed backup for \(target.email)")
-
-        await refresh(force: true)
+        CodexAccountRegistry.save(accounts, to: defaults)
+        refreshBackupPresence()
+        // Profile directories and legacy Keychain entries are retained, not logged out or deleted.
     }
 
     func setLabel(_ label: String?, forAccount id: UUID) {
         guard let index = accounts.firstIndex(where: { $0.id == id }) else { return }
         let trimmed = label?.trimmingCharacters(in: .whitespaces)
         accounts[index].customLabel = (trimmed?.isEmpty == true) ? nil : trimmed
-        CodexAccountRegistry.save(accounts)
+        CodexAccountRegistry.save(accounts, to: defaults)
         log.info("[setLabel] \(accounts[index].email): \(trimmed ?? "nil")")
     }
 }

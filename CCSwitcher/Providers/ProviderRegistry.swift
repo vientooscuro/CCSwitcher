@@ -15,7 +15,10 @@ enum ProviderRegistry {
     ) -> [AIProviderType] {
         var available: [AIProviderType] = []
         if claudeInstalled { available.append(.claudeCode) }
-        if fileExists(codexAuthPath) { available.append(.codex) }
+        if fileExists(codexAuthPath) || fileExists("/Applications/Codex.app")
+            || (fileExists("/Applications/ChatGPT.app") && Bundle(path: "/Applications/ChatGPT.app")?.bundleIdentifier == "com.openai.codex") {
+            available.append(.codex)
+        }
 
         // Never return empty: the hub must always have a surface to render, and
         // a Claude-shaped empty state is the same thing the app shows today

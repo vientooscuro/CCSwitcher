@@ -7,6 +7,10 @@ import XCTest
 @MainActor
 final class CodexStateTests: XCTestCase {
 
+    func testDesktopAccountsCanBeAddedWithoutReplacingDefaultCredentials() {
+        XCTAssertTrue(CodexState().capabilities.canLoginNewAccount)
+    }
+
     private func account(_ email: String) -> Account {
         Account(email: email, displayName: email, provider: .codex)
     }
