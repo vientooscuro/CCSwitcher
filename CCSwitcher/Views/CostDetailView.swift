@@ -10,9 +10,29 @@ struct CostDetailView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
-                todayCard
-                periodSummaryCards
-                dailyHistorySection
+                if let codex = hub.surface as? CodexState {
+                    Picker("Statistics", selection: Binding(
+                        get: { codex.statisticsScope },
+                        set: { scope in
+                            codex.statisticsScope = scope
+                            Task { await codex.refreshCostAndActivity() }
+                        }
+                    )) {
+                        Text("All profiles").tag(CodexStatisticsScope.allProfiles)
+                        Text("Current account").tag(CodexStatisticsScope.currentAccount)
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.horizontal, 16)
+                }
+                if (hub.surface as? CodexState)?.isStatisticsLoading == true {
+                    ProgressView("Rebuilding Codex history…")
+                        .font(.caption)
+                        .padding()
+                } else {
+                    todayCard
+                    periodSummaryCards
+                    dailyHistorySection
+                }
                 pricingInfoSection
             }
             .padding(.vertical, 12)
@@ -232,12 +252,20 @@ struct CostDetailView: View {
             .padding(.horizontal, 16)
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("Cost is computed from your local Claude Code session logs (jsonl files) under ~/.claude/projects/.")
+                if !hub.surface.cost.unpricedModels.isEmpty {
+                    Text("Estimate is incomplete. Missing rates: \(hub.surface.cost.unpricedModels.joined(separator: ", "))")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text(hub.activeProvider == .codex
+                     ? "Estimated API-equivalent cost from local Codex session logs, including archives. This is not your subscription charge. Historical usage before profile isolation cannot be reliably split between accounts."
+                     : "Cost is computed from your local Claude Code session logs (jsonl files) under ~/.claude/projects/.")
                     .font(.caption2)
                     .foregroundStyle(theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                if let v = VerifiedAgainst.load() {
+                if hub.activeProvider == .claudeCode, let v = VerifiedAgainst.load() {
                     HStack(spacing: 6) {
                         Image(systemName: "checkmark.seal.fill")
                             .font(.caption2)

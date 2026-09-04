@@ -58,6 +58,18 @@ final class CodexDesktopProfiles {
         )
     }
 
+    var statisticsHomes: [URL] {
+        let root = userHome.appendingPathComponent("Library/Application Support/CCSwitcher/CodexProfiles")
+        let directories = (try? FileManager.default.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
+        )) ?? []
+        return [defaultProfile.home] + directories
+            .filter { UUID(uuidString: $0.lastPathComponent) != nil }
+            .map { $0.appendingPathComponent("home") }
+            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            .sorted { $0.path < $1.path }
+    }
+
     func bindDefault(to id: UUID) {
         guard defaultAccountID == nil else { return }
         defaults.set(id.uuidString, forKey: Self.defaultAccountKey)

@@ -23,6 +23,7 @@ struct DailyCostEntry: Identifiable {
 struct CostSeriesModel {
     let todayCost: Double
     let daily: [DailyCostEntry]
+    var unpricedModels: [String] = []
 
     var totalCost: Double { daily.reduce(0) { $0 + $1.cost } }
 

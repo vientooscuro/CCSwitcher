@@ -10,7 +10,7 @@ struct CodexActivityTotals: Sendable {
     var activeMinutes: Int = 0
 }
 
-/// Incrementally aggregates `~/.codex/sessions/**/rollout-*.jsonl`.
+/// Incrementally aggregates active and archived rollout files from selected homes.
 ///
 /// A real install measured 940 files totalling 2 GB, so re-reading the tree on
 /// every 5-minute refresh is not an option. Files are keyed by path and mtime;
@@ -42,7 +42,10 @@ actor CodexSessionCache {
     /// deduplicated per session. Cached files now carry the raw
     /// `turnTimestampsByDay`/`patchEventsByDay`/`activeMinuteBucketsByDay`
     /// needed to dedup those, same shape as v4's token fix.
-    private static let currentVersion = 5
+    /// v6: request deltas and timestamp identities replace magnitude-sorted
+    /// cumulative counters, which merged independent agent usage incorrectly.
+    /// v7: stable turn identities deduplicate fork replay with rewritten timestamps.
+    private static let currentVersion = 7
 
     private var files: [String: CodexRolloutAggregate] = [:]
     private var loaded = false
@@ -55,12 +58,17 @@ actor CodexSessionCache {
         return dir.appendingPathComponent("codex-session-cache.json")
     }()
 
-    private let sessionsRoot: String
+    private let sessionsRoots: [String]
     private let cacheURL: URL
 
     init(sessionsRoot: String = NSHomeDirectory() + "/.codex/sessions", cacheURL: URL? = nil) {
-        self.sessionsRoot = sessionsRoot
+        self.sessionsRoots = [sessionsRoot, URL(fileURLWithPath: sessionsRoot).deletingLastPathComponent().appendingPathComponent("archived_sessions").path]
         self.cacheURL = cacheURL ?? Self.defaultCacheURL
+    }
+
+    init(sessionRoots: [String], cacheURL: URL) {
+        self.sessionsRoots = sessionRoots
+        self.cacheURL = cacheURL
     }
 
     private struct ScanResult {
@@ -99,7 +107,10 @@ actor CodexSessionCache {
 
             if let cachedMtime = cachedMtimes[path], cachedMtime == mtime { continue }
 
-            if let aggregate = CodexRolloutParser.parse(contentsOf: path, relativePath: name, mtime: mtime) {
+            let parsed = autoreleasepool {
+                CodexRolloutParser.parse(contentsOf: path, relativePath: name, mtime: mtime)
+            }
+            if let aggregate = parsed {
                 updates[path] = aggregate
                 reparsed += 1
             }
@@ -114,20 +125,22 @@ actor CodexSessionCache {
     func refreshFromFilesystem() async {
         ensureLoaded()
 
-        let root = sessionsRoot
-        guard FileManager.default.fileExists(atPath: root) else {
-            log.info("refresh: no sessions directory")
-            return
-        }
-
         let start = Date()
         let cachedMtimes: [String: Double] = files.mapValues { $0.mtime }
-        let result = Self.scan(root: root, cachedMtimes: cachedMtimes)
+        var seen: Set<String> = []
+        var updates: [String: CodexRolloutAggregate] = [:]
+        var reparsed = 0
+        for root in sessionsRoots {
+            let scan = Self.scan(root: root, cachedMtimes: cachedMtimes)
+            seen.formUnion(scan.seenPaths)
+            updates.merge(scan.updates) { _, new in new }
+            reparsed += scan.reparsed
+        }
+        let result = ScanResult(seenPaths: seen, updates: updates, reparsed: reparsed)
 
         for (path, aggregate) in result.updates { files[path] = aggregate }
 
-        // Drop entries for files the user archived or deleted, otherwise their
-        // costs haunt the totals forever.
+        // Archiving moves a file between scanned roots; only deleted files disappear.
         let removed = files.keys.filter { !result.seenPaths.contains($0) }
         for path in removed { files.removeValue(forKey: path) }
 
@@ -142,15 +155,16 @@ actor CodexSessionCache {
         ensureLoaded()
         let tokensByDayAndModel = Self.mergedTokensByDayAndModel(from: Array(files.values))
 
-        // `sessions` counts distinct rollout files with any usage on a date —
-        // one file is one Codex session, matching what the Claude side reports.
-        // Unaffected by the session-aware dedup below: it's a file count, not a
-        // token sum.
+        // Copied/resumed files do not create extra sessions in the history.
         var byDate: [String: (cost: Double, models: [String: Double], totals: CodexTokenTotals, sessions: Int)] = [:]
-        for aggregate in files.values {
-            for day in Set(aggregate.tokenObservationRuns.map(\.day)) {
-                byDate[day, default: (0, [:], CodexTokenTotals(), 0)].sessions += 1
+        var sessionsByDay: [String: Set<String>] = [:]
+        for (path, aggregate) in files {
+            for day in Set(aggregate.usageEvents.map(\.day)) {
+                sessionsByDay[day, default: []].insert(aggregate.sessionId ?? path)
             }
+        }
+        for (day, sessions) in sessionsByDay {
+            byDate[day, default: (0, [:], CodexTokenTotals(), 0)].sessions = sessions.count
         }
 
         var modelIds: Set<String> = []
@@ -184,76 +198,85 @@ actor CodexSessionCache {
                     cost: entry.cost,
                     sessionCount: entry.sessions,
                     modelBreakdown: entry.models,
-                    inputTokens: entry.totals.inputTokens,
+                    inputTokens: max(0, entry.totals.inputTokens - entry.totals.cachedInputTokens),
                     outputTokens: entry.totals.outputTokens,
-                    cacheWriteTokens: entry.totals.cacheWriteTokens,
-                    cacheReadTokens: entry.totals.cachedInputTokens
+                    cacheWriteTokens: 0,
+                    cacheReadTokens: min(entry.totals.cachedInputTokens, entry.totals.inputTokens)
                 )
             }
             .sorted { $0.date > $1.date }
 
-        return CostSeriesModel(todayCost: byDate[today]?.cost ?? 0, daily: daily)
+        let unpriced = modelIds.filter { (prices[$0] ?? nil) == nil }.sorted()
+        return CostSeriesModel(todayCost: byDate[today]?.cost ?? 0, daily: daily, unpricedModels: unpriced)
     }
 
-    /// Deltas per day and model, deduplicated across every rollout file of the
-    /// same session. A resumed or subagent file replays earlier `token_count`
-    /// events verbatim, so naively summing each file's own per-file totals (as
-    /// this used to do) multiplies shared history by however many files the
-    /// session has — one real session measured 44 files sharing one
-    /// `session_id`, inflating a day's tokens by roughly 24x.
-    ///
-    /// A free function of the aggregates rather than a method reading `files`,
-    /// so it's directly unit-testable without touching the on-disk cache.
-    /// Static members of an actor aren't actor-isolated, so this needs no await.
+    /// Deduplicate replayed events, not whole counter curves: agents sharing
+    /// a session ID still have independent request usage and counter resets.
     static func mergedTokensByDayAndModel(from aggregates: [CodexRolloutAggregate]) -> [String: [String: CodexTokenTotals]] {
-        var bySession: [String: [CodexTokenObservation]] = [:]
-        for (index, aggregate) in aggregates.enumerated() {
-            // An aggregate without a session_id (shouldn't happen, but parsing
-            // is best-effort) falls back to a key unique to it, i.e. no
-            // cross-file merge — the same as today's behavior for that file.
-            let flattened = aggregate.tokenObservationRuns.flatMap { run in
-                run.cumulatives.map { CodexTokenObservation(day: run.day, model: run.model, cumulative: $0) }
-            }
-            bySession[aggregate.sessionId ?? "unkeyed-\(index)", default: []].append(contentsOf: flattened)
+        struct EventKey: Hashable {
+            let session: String
+            let scope: String?
+            let timestamp: Double
+            let cumulative: CodexTokenTotals
         }
-
-        var result: [String: [String: CodexTokenTotals]] = [:]
-        for observations in bySession.values {
-            // Two files of the same session see identical cumulative snapshots
-            // for shared history — dedup on the snapshot itself, then sort by
-            // its magnitude to recover the session-wide chronology before
-            // diffing. (Sorting by magnitude rather than timestamp is safe here
-            // because a session's counter only ever grows; per-file timestamp
-            // handling for the rare within-file counter reset stays in
-            // `CodexRolloutParser`.)
-            var seen: Set<CodexTokenTotals> = []
-            let unique = observations
-                .filter { seen.insert($0.cumulative).inserted }
-                .sorted { $0.cumulative.totalBillableTokens < $1.cumulative.totalBillableTokens }
-
-            var previous: CodexTokenTotals?
-            for observation in unique {
-                defer { previous = observation.cumulative }
-                guard let base = previous,
-                      let delta = CodexRolloutParser.difference(observation.cumulative, minus: base) else { continue }
-                var models = result[observation.day] ?? [:]
-                models[observation.model] = (models[observation.model] ?? CodexTokenTotals()) + delta
-                result[observation.day] = models
+        var events: [EventKey: CodexUsageEvent] = [:]
+        for (index, aggregate) in aggregates.enumerated() {
+            for event in aggregate.usageEvents {
+                let key = EventKey(session: aggregate.sessionId ?? "unkeyed-\(index)", scope: event.requestScope,
+                                   timestamp: event.timestamp, cumulative: event.cumulative)
+                // Replayed history keeps its timestamp and counters. A file
+                // beginning mid-history may only know the last request's delta.
+                if var existing = events[key] {
+                    if event.delta.totalBillableTokens == 0 {
+                        existing.delta = event.delta
+                    } else if existing.delta.totalBillableTokens > 0,
+                              event.delta.totalBillableTokens > existing.delta.totalBillableTokens {
+                        existing.delta = event.delta
+                    }
+                    if existing.model == "unknown" || (event.model != "unknown" && event.model < existing.model) {
+                        existing.model = event.model
+                    }
+                    events[key] = existing
+                    continue
+                }
+                events[key] = event
             }
+        }
+        struct RequestKey: Hashable {
+            let session: String
+            let scope: String?
+            let cumulative: CodexTokenTotals
+            let delta: CodexTokenTotals
+        }
+        var requests: [RequestKey: CodexUsageEvent] = [:]
+        for (key, event) in events {
+            guard event.delta.totalBillableTokens > 0 else { continue }
+            let requestKey = RequestKey(session: key.session, scope: key.scope, cumulative: event.cumulative, delta: event.delta)
+            if var existing = requests[requestKey] {
+                // Fork replay rewrites timestamps but preserves turn IDs and counters.
+                if event.timestamp < existing.timestamp {
+                    existing.timestamp = event.timestamp
+                    existing.day = event.day
+                }
+                if existing.model == "unknown" || (event.model != "unknown" && event.model < existing.model) {
+                    existing.model = event.model
+                }
+                requests[requestKey] = existing
+            } else {
+                requests[requestKey] = event
+            }
+        }
+        var result: [String: [String: CodexTokenTotals]] = [:]
+        for event in requests.values {
+            result[event.day, default: [:]][event.model, default: CodexTokenTotals()] =
+                (result[event.day]?[event.model] ?? CodexTokenTotals()) + event.delta
         }
         return result
     }
 
-    /// Turns, added lines and active minutes, deduplicated across every
-    /// rollout file of the same session — the same fix as
-    /// `mergedTokensByDayAndModel`, for the same reason: a resumed or
-    /// subagent file replays every earlier `task_started`/`apply_patch`/event
-    /// timestamp verbatim, so summing each file's own per-file counters (as
-    /// this used to do) multiplies shared history by however many files the
-    /// session has.
-    ///
-    /// A free function of the aggregates for the same testability reason as
-    /// `mergedTokensByDayAndModel`.
+    /// Legacy activity heuristic: collapses replays that preserve timestamps
+    /// and patch call IDs. Unlike request accounting, it cannot fully resolve
+    /// retimestamped history and is not an exact measure of work duration.
     static func mergedActivityByDay(from aggregates: [CodexRolloutAggregate]) -> [String: CodexActivityTotals] {
         struct SessionDay {
             var turnStamps: Set<Double> = []

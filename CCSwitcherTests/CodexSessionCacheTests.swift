@@ -6,6 +6,22 @@ import XCTest
 /// aggregates instead of touching the on-disk cache.
 final class CodexSessionCacheTests: XCTestCase {
 
+    private func withUsageEvents(_ aggregate: CodexRolloutAggregate) -> CodexRolloutAggregate {
+        var result = aggregate
+        var previous: CodexTokenTotals?
+        for run in aggregate.tokenObservationRuns {
+            for cumulative in run.cumulatives {
+                defer { previous = cumulative }
+                guard let previous, let delta = CodexRolloutParser.difference(cumulative, minus: previous) else { continue }
+                result.usageEvents.append(CodexUsageEvent(
+                    timestamp: Double(cumulative.totalBillableTokens), day: run.day,
+                    model: run.model, cumulative: cumulative, delta: delta
+                ))
+            }
+        }
+        return result
+    }
+
     private func parseFixture(_ name: String) throws -> CodexRolloutAggregate {
         let bundle = Bundle(for: Self.self)
         guard let url = bundle.url(forResource: name, withExtension: "jsonl", subdirectory: "Fixtures")
@@ -63,11 +79,11 @@ final class CodexSessionCacheTests: XCTestCase {
         let merged = CodexSessionCache.mergedTokensByDayAndModel(from: [original, resumed])
 
         let tail = try XCTUnwrap(merged["2026-08-01"]?["gpt-5.6-echo"])
-        // 4300/3200/0/500 -> 4800/3400/0/650, i.e. two new deltas of
-        // (300,200,0,100) and (300,200,0,150), unique to the resumed file.
-        XCTAssertEqual(tail.inputTokens, 600)
-        XCTAssertEqual(tail.cachedInputTokens, 400)
-        XCTAssertEqual(tail.outputTokens, 250)
+        // After the fixture's reset, the curve grows from 60/10/0/20
+        // to 4600/3400/0/650. Magnitude sorting incorrectly discarded that growth.
+        XCTAssertEqual(tail.inputTokens, 4540)
+        XCTAssertEqual(tail.cachedInputTokens, 3390)
+        XCTAssertEqual(tail.outputTokens, 630)
 
         // 2026-07-31 is untouched by the resumed file's new tail: the delta
         // there comes entirely from history both files agree on.
@@ -80,7 +96,7 @@ final class CodexSessionCacheTests: XCTestCase {
     /// observation the main thread's file already recorded — then climbs past
     /// where the main file stopped. Only the unique tail beyond the shared
     /// point should be attributed to the subagent.
-    func testSubagentStartingMidCurveContributesOnlyItsUniqueTail() {
+    func testSubagentStartingMidCurveKeepsItsIndependentGrowth() {
         let main = CodexRolloutAggregate(
             sessionId: "sub-session",
             tokenObservationRuns: [
@@ -105,17 +121,17 @@ final class CodexSessionCacheTests: XCTestCase {
             ]
         )
 
-        let merged = CodexSessionCache.mergedTokensByDayAndModel(from: [main, subagent])
+        let merged = CodexSessionCache.mergedTokensByDayAndModel(from: [main, subagent].map(withUsageEvents))
 
         // Main file's own deltas: 100->300 and 300->600.
         let sol = merged["2026-07-30"]?["gpt-5.6-sol"]
         XCTAssertEqual(sol?.inputTokens, 500)   // (300-100) + (600-300)
         XCTAssertEqual(sol?.outputTokens, 50)
 
-        // Subagent's unique tail: 600->700 and 700->900, not 300->700.
+        // The subagent grows from its own 300 baseline, not the parent's 600.
         let sub = merged["2026-07-30"]?["gpt-5.6-sub"]
-        XCTAssertEqual(sub?.inputTokens, 300)   // (700-600) + (900-700)
-        XCTAssertEqual(sub?.outputTokens, 30)
+        XCTAssertEqual(sub?.inputTokens, 600)
+        XCTAssertEqual(sub?.outputTokens, 60)
     }
 
     /// Two files with different session_ids must not have their observations
@@ -143,7 +159,7 @@ final class CodexSessionCacheTests: XCTestCase {
             ]
         )
 
-        let merged = CodexSessionCache.mergedTokensByDayAndModel(from: [sessionA, sessionB])
+        let merged = CodexSessionCache.mergedTokensByDayAndModel(from: [sessionA, sessionB].map(withUsageEvents))
 
         // If sessions were merged before dedup, this would read 400: the
         // identical snapshots would collapse into one. Two independent

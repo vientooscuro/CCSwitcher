@@ -17,9 +17,8 @@ final class CodexRolloutParserTests: XCTestCase {
         return aggregate
     }
 
-    /// First event establishes the baseline; only subsequent growth is billable.
-    /// Treating the first cumulative value as a delta would double-count the
-    /// opening turn of every session.
+    /// Without last-request usage, a partial file's initial cumulative value
+    /// is only a baseline. Real first-request events are covered separately.
     func testFirstEventEstablishesBaseline() throws {
         let totals = try parseFixture().tokens["2026-07-30"]!["gpt-5.6-sol"]!
         // 1000 -> 3000 is the only sol delta on the 30th: +2000 input, +1700 cached, +200 output.

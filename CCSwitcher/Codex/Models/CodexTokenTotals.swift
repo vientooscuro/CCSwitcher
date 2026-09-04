@@ -73,6 +73,45 @@ struct CodexTokenObservationRun: Codable, Sendable {
     var cumulatives: [CodexTokenTotals]
 }
 
+struct CodexUsageEvent: Codable, Sendable {
+    var timestamp: Double
+    var day: String
+    var model: String
+    var cumulative: CodexTokenTotals
+    var delta: CodexTokenTotals
+    var requestScope: String?
+
+    init(timestamp: Double, day: String, model: String, cumulative: CodexTokenTotals, delta: CodexTokenTotals, requestScope: String? = nil) {
+        self.timestamp = timestamp
+        self.day = day
+        self.model = model
+        self.cumulative = cumulative
+        self.delta = delta
+        self.requestScope = requestScope
+    }
+
+    // Millions of replayed events make repeated JSON keys materially expensive.
+    init(from decoder: Decoder) throws {
+        var values = try decoder.unkeyedContainer()
+        timestamp = try values.decode(Double.self)
+        day = try values.decode(String.self)
+        model = try values.decode(String.self)
+        cumulative = try values.decode(CodexTokenTotals.self)
+        delta = try values.decode(CodexTokenTotals.self)
+        requestScope = values.isAtEnd ? nil : try values.decodeIfPresent(String.self)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.unkeyedContainer()
+        try values.encode(timestamp)
+        try values.encode(day)
+        try values.encode(model)
+        try values.encode(cumulative)
+        try values.encode(delta)
+        try values.encode(requestScope)
+    }
+}
+
 /// One `apply_patch` tool call. `id` is the event's `call_id` where present —
 /// a resumed or subagent file replays the same `call_id` verbatim for shared
 /// history, making it a far better cross-file dedup key than a timestamp.
@@ -105,7 +144,7 @@ struct CodexRolloutAggregate: Codable, Sendable {
     /// "yyyy-MM-dd" -> model id -> totals, computed from this file's own events
     /// in isolation. Correct for a standalone file, but summing this across
     /// every file of a resumed session double- (or n-times-) counts replayed
-    /// history — `CodexSessionCache` uses `tokenObservationRuns` instead for that.
+    /// history — `CodexSessionCache` uses timestamped `usageEvents` instead.
     var tokens: [String: [String: CodexTokenTotals]] = [:]
     /// This file's own per-day counts, computed in isolation — see `tokens`
     /// above for why these are unsafe to sum across a session's files.
@@ -116,12 +155,9 @@ struct CodexRolloutAggregate: Codable, Sendable {
     /// `session_meta.session_id`, shared by every rollout file that resumes or
     /// forks off the same session.
     var sessionId: String?
-    /// Every `token_count` event this file saw, as raw cumulative snapshots
-    /// grouped into runs (not yet turned into deltas). Cross-file dedup needs
-    /// the cumulative value itself, since deltas already collapsed the
-    /// information needed to recognize replayed history from another file of
-    /// the same session.
+    /// Legacy synthetic observations retained for counter-curve regression fixtures.
     var tokenObservationRuns: [CodexTokenObservationRun] = []
+    var usageEvents: [CodexUsageEvent] = []
     /// `task_started` event timestamps (epoch seconds), by day. Two files of
     /// the same session replay the same `task_started` verbatim, so the
     /// timestamp — not this file's own count — is what `CodexSessionCache`

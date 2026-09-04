@@ -2,6 +2,11 @@ import SwiftUI
 
 private let log = FileLog("CodexState")
 
+enum CodexStatisticsScope: String {
+    case allProfiles
+    case currentAccount
+}
+
 /// Desktop accounts keep independent live credentials; snapshots are never restored.
 @MainActor
 final class CodexState: ObservableObject, ProviderSurface {
@@ -23,6 +28,15 @@ final class CodexState: ObservableObject, ProviderSurface {
     @Published private var usageError: ProviderErrorModel?
     @Published private var costSeries: CostSeriesModel = .empty
     @Published private var activitySummary: ActivitySummaryModel = .empty
+    @Published var statisticsScope: CodexStatisticsScope {
+        didSet {
+            guard oldValue != statisticsScope else { return }
+            defaults.set(statisticsScope.rawValue, forKey: "codexStatisticsScope")
+            invalidateStatistics()
+        }
+    }
+    @Published private(set) var isStatisticsLoading = false
+    private var statisticsGeneration = UUID()
     /// Set when the live `auth.json` fingerprint matches no known account —
     /// surfaced on the active account's card until the user imports it.
     @Published private var desyncNotice: String?
@@ -56,6 +70,7 @@ final class CodexState: ObservableObject, ProviderSurface {
         self.defaults = defaults
         self.profiles = profiles ?? CodexDesktopProfiles(defaults: defaults)
         self.openDesktop = openDesktop
+        statisticsScope = defaults.string(forKey: "codexStatisticsScope").flatMap(CodexStatisticsScope.init(rawValue:)) ?? .allProfiles
         accounts = CodexAccountRegistry.load(from: defaults)
     }
 
@@ -214,7 +229,7 @@ final class CodexState: ObservableObject, ProviderSurface {
         }
 
         await refreshLimits(auth: auth, force: force)
-        await refreshCostAndActivity()
+        await refreshCostAndActivity(notify: false)
         syncActiveAccountFields()
         if let activeId = accounts.first(where: \.isActive)?.id, let snapshot {
             accountSnapshots[activeId] = snapshot
@@ -283,25 +298,48 @@ final class CodexState: ObservableObject, ProviderSurface {
         log.info("[refresh] using local snapshot from \(fallback.observedAt)")
     }
 
-    private func refreshCostAndActivity() async {
+    private func invalidateStatistics() {
+        statisticsGeneration = UUID()
+        costSeries = .empty
+        activitySummary = .empty
+        isStatisticsLoading = true
+    }
+
+    func refreshCostAndActivity(notify: Bool = true) async {
+        let generation = UUID()
+        statisticsGeneration = generation
+        isStatisticsLoading = true
+        defer {
+            if statisticsGeneration == generation { isStatisticsLoading = false }
+        }
         let profile = selectedProfile
+        let scope = statisticsScope
+        let homes = scope == .allProfiles ? profiles.statisticsHomes : [profile.home]
+        let roots = homes.flatMap { home in
+            [home.appendingPathComponent("sessions").path, home.appendingPathComponent("archived_sessions").path]
+        }.sorted()
+        let key = roots.joined(separator: "\n")
         let sessionCache: CodexSessionCache
-        if profile.isDefault {
-            sessionCache = .shared
-        } else if let cached = profileSessionCaches[profile.home.path] {
+        if let cached = profileSessionCaches[key] {
             sessionCache = cached
         } else {
+            let cacheURL = scope == .allProfiles
+                ? profiles.defaultProfile.home.appendingPathComponent("ccswitcher-all-session-cache.json")
+                : profile.home.appendingPathComponent("ccswitcher-session-cache.json")
             sessionCache = CodexSessionCache(
-                sessionsRoot: profile.home.appendingPathComponent("sessions").path,
-                cacheURL: profile.home.appendingPathComponent("ccswitcher-session-cache.json")
+                sessionRoots: roots, cacheURL: cacheURL
             )
-            profileSessionCaches[profile.home.path] = sessionCache
+            profileSessionCaches[key] = sessionCache
         }
         await PricingService.shared.reloadIfFreshChanged()
         PricingService.shared.refreshInBackground()
         await sessionCache.refreshFromFilesystem()
-        costSeries = await sessionCache.costSeries()
-        activitySummary = await sessionCache.activityToday()
+        let cost = await sessionCache.costSeries()
+        let activity = await sessionCache.activityToday()
+        guard statisticsGeneration == generation, statisticsScope == scope, selectedProfile == profile else { return }
+        costSeries = cost
+        activitySummary = activity
+        if notify { didRefresh?() }
         log.info("[refresh] today=$\(String(format: "%.2f", costSeries.todayCost)) turns=\(activitySummary.turns)")
     }
 
@@ -553,8 +591,7 @@ final class CodexState: ObservableObject, ProviderSurface {
         usageError = nil
         desyncNotice = nil
         rateLimitedUntil = nil
-        costSeries = .empty
-        activitySummary = .empty
+        invalidateStatistics()
     }
 
     func removeAccount(id: UUID) {

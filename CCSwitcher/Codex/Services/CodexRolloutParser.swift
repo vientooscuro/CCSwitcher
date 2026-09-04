@@ -27,30 +27,16 @@ enum CodexRolloutParser {
         // put an "unknown" row in the UI and priced those tokens at zero.
         var currentModel: String?
         var pendingByDate: [String: CodexTokenTotals] = [:]
-        // Baseline for delta accounting. `total_token_usage` is cumulative per
-        // session and was strictly monotonic across 23063 real events, so
-        // differencing it is exact. Summing `last_token_usage` instead
-        // overshoots by roughly 6% because streaming repeats events.
+        // Cumulative snapshots suppress streaming duplicates. Last-request
+        // usage stays valid across independent agent counters and resets.
         var previous: CodexTokenTotals?
+        var previousTimestamp: Double?
+        var requestScope: String?
+        var pendingUsage: [CodexUsageEvent] = []
         var timestampsByDate: [String: [Date]] = [:]
-        // Raw cumulative snapshots, buffered the same way as `pendingByDate`
-        // until the model is known, then flushed. Kept independent of the
-        // delta bookkeeping above because cross-file dedup (CodexSessionCache)
-        // needs the cumulative value itself, not this file's own delta.
-        var pendingObservations: [(day: String, cumulative: CodexTokenTotals)] = []
-        var runs: [CodexTokenObservationRun] = []
         var turnTimestampsByDay: [String: [Double]] = [:]
         var patchEventsByDay: [String: [CodexPatchEvent]] = [:]
         var activeMinuteBucketsByDay: [String: [Int]] = [:]
-        // Collapses consecutive same-day/same-model snapshots into one run
-        // instead of one entry per event — see `CodexTokenObservationRun`.
-        func recordObservation(day: String, model: String, cumulative: CodexTokenTotals) {
-            if let last = runs.indices.last, runs[last].day == day, runs[last].model == model {
-                runs[last].cumulatives.append(cumulative)
-            } else {
-                runs.append(CodexTokenObservationRun(day: day, model: model, cumulatives: [cumulative]))
-            }
-        }
 
         for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
             guard let lineData = line.data(using: .utf8),
@@ -70,11 +56,16 @@ enum CodexRolloutParser {
 
             switch event["type"] as? String {
             case "session_meta":
-                if let sessionId = payload?["session_id"] as? String {
+                previous = nil
+                previousTimestamp = nil
+                currentModel = nil
+                requestScope = (payload?["id"] as? String) ?? (payload?["session_id"] as? String)
+                if let sessionId = (payload?["session_id"] as? String) ?? (payload?["id"] as? String) {
                     aggregate.sessionId = sessionId
                 }
 
             case "turn_context":
+                if let turnID = payload?["turn_id"] as? String { requestScope = turnID }
                 if let model = payload?["model"] as? String, !model.isEmpty {
                     if currentModel == nil, !pendingByDate.isEmpty {
                         for (day, buffered) in pendingByDate {
@@ -84,13 +75,15 @@ enum CodexRolloutParser {
                         }
                         pendingByDate = [:]
                     }
-                    if currentModel == nil, !pendingObservations.isEmpty {
-                        for pending in pendingObservations {
-                            recordObservation(day: pending.day, model: model, cumulative: pending.cumulative)
-                        }
-                        pendingObservations = []
-                    }
                     currentModel = model
+                    if !pendingUsage.isEmpty {
+                        aggregate.usageEvents += pendingUsage.map { event in
+                            var event = event
+                            event.model = model
+                            return event
+                        }
+                        pendingUsage = []
+                    }
                 }
 
             case "event_msg":
@@ -115,18 +108,35 @@ enum CodexRolloutParser {
                           let timestamp else { break }
                     let cumulative = totals(fromTotalUsage: raw)
                     let day = Formatters.isoDay.string(from: timestamp)
-                    // Record the raw snapshot regardless of delta bookkeeping —
-                    // even the event that sets this file's own baseline may be
-                    // mid-session from the session's point of view.
-                    if let currentModel {
-                        recordObservation(day: day, model: currentModel, cumulative: cumulative)
-                    } else {
-                        pendingObservations.append((day: day, cumulative: cumulative))
+                    defer {
+                        previous = cumulative
+                        previousTimestamp = timestamp.timeIntervalSince1970
                     }
-                    defer { previous = cumulative }
-                    guard let base = previous else { break }   // first event only sets the baseline
-                    let delta = difference(cumulative, minus: base)
-                    guard let delta else { break }             // regression: rebase silently
+                    if cumulative == previous, previousTimestamp == timestamp.timeIntervalSince1970 { break }
+                    // A first/reset event can carry real usage. A repeated
+                    // cumulative snapshot is still zero, even when last usage repeats.
+                    let lastUsage = (info["last_token_usage"] as? [String: Any]).map(totals(fromTotalUsage:))
+                    let delta: CodexTokenTotals?
+                    if cumulative == previous {
+                        // Keep proof of a repeated snapshot: another partial
+                        // replay may begin here and mistake it for a first request.
+                        delta = CodexTokenTotals()
+                    } else if previous == nil {
+                        delta = lastUsage == cumulative ? lastUsage : nil
+                    } else {
+                        delta = lastUsage ?? previous.flatMap { difference(cumulative, minus: $0) }
+                    }
+                    guard let delta else { break }
+                    let usage = CodexUsageEvent(
+                        timestamp: timestamp.timeIntervalSince1970, day: day,
+                        model: currentModel ?? "unknown", cumulative: cumulative, delta: delta, requestScope: requestScope
+                    )
+                    if currentModel != nil {
+                        aggregate.usageEvents.append(usage)
+                    } else {
+                        pendingUsage.append(usage)
+                    }
+                    guard delta.totalBillableTokens > 0 else { break }
                     guard let currentModel else {
                         pendingByDate[day] = (pendingByDate[day] ?? CodexTokenTotals()) + delta
                         break
@@ -161,21 +171,13 @@ enum CodexRolloutParser {
             }
         }
 
-        if !pendingByDate.isEmpty {
-            // No `turn_context` anywhere in the file, so the model is genuinely
-            // unknowable and the tokens cannot be priced. Dropping them is
-            // better than inventing a model or surfacing an "unknown" row.
-            let dropped = pendingByDate.values.reduce(0) { $0 + $1.totalBillableTokens }
-            log.warning("parse: \(relativePath) has no turn_context, dropping \(dropped) unattributable tokens")
-        }
+        // Unknown pricing must not erase real token usage.
+        aggregate.usageEvents += pendingUsage
 
         for (day, stamps) in timestampsByDate {
             aggregate.activeMinutes[day] = activeMinutes(stamps)
         }
 
-        // pendingObservations left over here shares the same fate as
-        // pendingByDate above: no turn_context ever appeared, so it's dropped.
-        aggregate.tokenObservationRuns = runs
         aggregate.turnTimestampsByDay = turnTimestampsByDay
         aggregate.patchEventsByDay = patchEventsByDay
         // Dedup within the file: a replay-heavy session only needs the union
