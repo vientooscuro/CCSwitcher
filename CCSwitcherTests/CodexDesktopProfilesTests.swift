@@ -94,6 +94,112 @@ final class CodexDesktopProfilesTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: json).write(to: url)
     }
 
+    func testRefreshReportsMissingCredentialsForInactiveAccount() async {
+        let first = Account(email: "first@example.com", displayName: "First", provider: .codex, isActive: true)
+        let second = Account(email: "second@example.com", displayName: "Second", provider: .codex)
+        CodexAccountRegistry.save([first, second], to: defaults)
+        let state = CodexState(defaults: defaults, profiles: profiles, openDesktop: { _ in
+            XCTFail("Refreshing limits must not open or switch a desktop profile")
+        })
+
+        await state.refresh(force: true)
+
+        XCTAssertNotNil(state.accountCards.first { $0.id == second.id }?.error)
+        XCTAssertEqual(state.accounts.first(where: \.isActive)?.id, first.id)
+    }
+
+    private func usage(_ percent: Double, plan: String = "pro") -> CodexUsageService.Result {
+        let snapshot = CodexRateLimitSnapshot(
+            windows: [.init(usedPercent: percent, windowSeconds: 604800, resetAt: nil)],
+            scoped: [], planType: plan, creditsBalance: nil, hasCredits: false,
+            unlimitedCredits: false, reachedType: nil, spendControlReached: false
+        )
+        return .init(snapshot: snapshot, email: nil, isStale: false, observedAt: Date())
+    }
+
+    private func signedInAccounts() throws -> (Account, Account) {
+        let first = Account(email: "first@example.com", displayName: "First", provider: .codex, isActive: true)
+        let second = Account(email: "second@example.com", displayName: "Second", provider: .codex)
+        profiles.bindDefault(to: first.id)
+        CodexAccountRegistry.save([first, second], to: defaults)
+        try writeAuth(email: first.email, to: profiles.profile(for: first.id).authURL)
+        try writeAuth(email: second.email, to: profiles.profile(for: second.id).authURL)
+        return (first, second)
+    }
+
+    func testRefreshFetchesEachLiveProfileWithoutSwitchingOrWritingCredentials() async throws {
+        let (first, second) = try signedInAccounts()
+        let originalAuth = try [first, second].map { try Data(contentsOf: profiles.profile(for: $0.id).authURL) }
+        let state = CodexState(defaults: defaults, profiles: profiles, openDesktop: { _ in
+            XCTFail("Refresh must not open desktop windows")
+        }, fetchUsage: { auth, id in
+            XCTAssertEqual(auth.tokens.accountId, id == first.id ? first.email : second.email)
+            return self.usage(id == first.id ? 86 : 25, plan: id == first.id ? "team" : "pro")
+        }, cachedUsage: { _ in nil })
+
+        await state.refresh(force: true)
+
+        XCTAssertEqual(state.accountCards.first { $0.id == first.id }?.windows.first?.utilization, 86)
+        XCTAssertEqual(state.accountCards.first { $0.id == second.id }?.windows.first?.utilization, 25)
+        XCTAssertNil(state.accountCards.first { $0.id == second.id }?.notice)
+        XCTAssertEqual(state.accounts.first { $0.id == second.id }?.subscriptionType, "pro")
+        XCTAssertEqual(state.accounts.first(where: \.isActive)?.id, first.id)
+        XCTAssertEqual(try [first, second].map { try Data(contentsOf: profiles.profile(for: $0.id).authURL) }, originalAuth)
+    }
+
+    func testRefreshBackoffAndErrorsAreIsolatedPerProfile() async throws {
+        let (first, second) = try signedInAccounts()
+        var calls: [UUID: Int] = [:]
+        let state = CodexState(defaults: defaults, profiles: profiles, fetchUsage: { _, id in
+            calls[id, default: 0] += 1
+            if id == first.id { throw CodexUsageService.UsageError.rateLimited(retryAfter: 600) }
+            return self.usage(25)
+        }, cachedUsage: { id in id == first.id ? self.usage(86) : nil })
+
+        await state.refresh(force: true)
+        await state.refresh(force: false)
+
+        XCTAssertEqual(calls[first.id], 1)
+        XCTAssertEqual(calls[second.id], 2)
+        XCTAssertEqual(state.accountCards.first { $0.id == first.id }?.error?.isRateLimited, true)
+        XCTAssertEqual(state.accountCards.first { $0.id == first.id }?.windows.first?.utilization, 86)
+        XCTAssertNil(state.accountCards.first { $0.id == second.id }?.error)
+        XCTAssertEqual(state.accountCards.first { $0.id == second.id }?.windows.first?.utilization, 25)
+
+        await state.refresh(force: true)
+        XCTAssertEqual(calls[first.id], 2)
+        XCTAssertEqual(calls[second.id], 3)
+    }
+
+    func testInactiveProfileUsesItsOwnCacheWhenLiveFetchFails() async throws {
+        let (first, second) = try signedInAccounts()
+        let state = CodexState(defaults: defaults, profiles: profiles, fetchUsage: { _, id in
+            if id == second.id { throw CodexUsageService.UsageError.needsReauth }
+            return self.usage(86)
+        }, cachedUsage: { id in id == second.id ? self.usage(25) : nil })
+
+        await state.refresh(force: true)
+
+        XCTAssertEqual(state.accountCards.first { $0.id == first.id }?.windows.first?.utilization, 86)
+        XCTAssertEqual(state.accountCards.first { $0.id == second.id }?.windows.first?.utilization, 25)
+        XCTAssertEqual(state.accountCards.first { $0.id == second.id }?.error?.needsReauth, true)
+        XCTAssertNotNil(state.accountCards.first { $0.id == second.id }?.notice)
+    }
+
+    func testMismatchedInactiveProfileIsNotFetchedOrShownAsAnotherAccount() async throws {
+        let (first, second) = try signedInAccounts()
+        try writeAuth(email: first.email, to: profiles.profile(for: second.id).authURL)
+        let state = CodexState(defaults: defaults, profiles: profiles, fetchUsage: { _, id in
+            XCTAssertEqual(id, first.id)
+            return self.usage(86)
+        }, cachedUsage: { _ in self.usage(25) })
+
+        await state.refresh(force: true)
+
+        XCTAssertEqual(state.accountCards.first { $0.id == second.id }?.error?.needsReauth, true)
+        XCTAssertEqual(state.accountCards.first { $0.id == second.id }?.windows.count, 0)
+    }
+
     func testSwitchingLegacyAccountOpensEmptyProfileAndPreservesDefault() async throws {
         let first = Account(email: "first@example.com", displayName: "First", provider: .codex, isActive: true)
         let second = Account(email: "second@example.com", displayName: "Second", provider: .codex)

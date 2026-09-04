@@ -20,12 +20,6 @@ final class CodexState: ObservableObject, ProviderSurface {
     /// Ids that currently have a stored `auth.json` backup, from one store read.
     @Published private(set) var accountsWithBackups: Set<UUID> = []
 
-    @Published private var snapshot: CodexRateLimitSnapshot?
-    @Published private var snapshotIsStale = false
-    @Published private var email: String?
-    @Published private var name: String?
-    @Published private var planType: String?
-    @Published private var usageError: ProviderErrorModel?
     @Published private var costSeries: CostSeriesModel = .empty
     @Published private var activitySummary: ActivitySummaryModel = .empty
     @Published var statisticsScope: CodexStatisticsScope {
@@ -44,15 +38,16 @@ final class CodexState: ObservableObject, ProviderSurface {
     /// Set by `ProviderHub` at init. Called once a refresh finishes.
     var didRefresh: (() -> Void)?
 
-    /// Last-known numbers for accounts that are not currently active, so
-    /// switching away from an account does not blank its card.
-    private var accountSnapshots: [UUID: CodexRateLimitSnapshot] = [:]
+    private struct AccountUsage {
+        var snapshot: CodexRateLimitSnapshot?
+        var isStale = false
+        var error: ProviderErrorModel?
+        var rateLimitedUntil: Date?
+    }
+    @Published private var accountUsage: [UUID: AccountUsage] = [:]
 
-    /// Per-account 429 back-off, matching the Claude behaviour: a rate limit
-    /// blocks refreshes but must not discard numbers already fetched.
-    private var rateLimitedUntil: Date?
-
-    private let usageService = CodexUsageService.shared
+    private let fetchUsage: @MainActor (CodexAuth, UUID) async throws -> CodexUsageService.Result
+    private let cachedUsage: @MainActor (UUID) async -> CodexUsageService.Result?
     private var profileSessionCaches: [String: CodexSessionCache] = [:]
     private let defaults: UserDefaults
     let profiles: CodexDesktopProfiles
@@ -65,11 +60,21 @@ final class CodexState: ObservableObject, ProviderSurface {
     init(
         defaults: UserDefaults = .standard,
         profiles: CodexDesktopProfiles? = nil,
-        openDesktop: @escaping (CodexDesktopProfile) async throws -> Void = CodexDesktopProfiles.open
+        openDesktop: @escaping (CodexDesktopProfile) async throws -> Void = CodexDesktopProfiles.open,
+        fetchUsage: @escaping @MainActor (CodexAuth, UUID) async throws -> CodexUsageService.Result = { auth, id in
+            try await CodexUsageService.shared.fetchLive(
+                accessToken: auth.tokens.accessToken, accountId: auth.tokens.accountId, profileID: id
+            )
+        },
+        cachedUsage: @escaping @MainActor (UUID) async -> CodexUsageService.Result? = { id in
+            CodexUsageService.shared.localFallback(profileID: id)
+        }
     ) {
         self.defaults = defaults
         self.profiles = profiles ?? CodexDesktopProfiles(defaults: defaults)
         self.openDesktop = openDesktop
+        self.fetchUsage = fetchUsage
+        self.cachedUsage = cachedUsage
         statisticsScope = defaults.string(forKey: "codexStatisticsScope").flatMap(CodexStatisticsScope.init(rawValue:)) ?? .allProfiles
         accounts = CodexAccountRegistry.load(from: defaults)
     }
@@ -114,10 +119,10 @@ final class CodexState: ObservableObject, ProviderSurface {
     var accountCards: [UsageCardModel] {
         let obfuscate = obfuscateEmails
         return accounts.map { account in
-            let effectiveSnapshot = account.isActive ? snapshot : accountSnapshots[account.id]
-            let notice = account.isActive
-                ? desyncNotice ?? effectiveSnapshot.flatMap { CodexDisplayMapper.notice(from: $0, isStale: snapshotIsStale) }
-                : effectiveSnapshot.flatMap { CodexDisplayMapper.notice(from: $0, isStale: true) }
+            let usage = accountUsage[account.id]
+            let effectiveSnapshot = usage?.snapshot
+            let notice = (account.isActive ? desyncNotice : nil)
+                ?? effectiveSnapshot.flatMap { CodexDisplayMapper.notice(from: $0, isStale: usage?.isStale == true) }
             return UsageCardModel(
                 id: account.id,
                 title: account.effectiveDisplayName(obfuscated: obfuscate),
@@ -128,7 +133,7 @@ final class CodexState: ObservableObject, ProviderSurface {
                 scopedLimits: effectiveSnapshot.map(CodexDisplayMapper.scopedLimits(from:)) ?? [],
                 credits: effectiveSnapshot.flatMap(CodexDisplayMapper.credits(from:)),
                 notice: notice,
-                error: account.isActive ? usageError : nil
+                error: usage?.error
             )
         }
     }
@@ -170,7 +175,7 @@ final class CodexState: ObservableObject, ProviderSurface {
                 windows: card?.windows ?? [],
                 scopedLimits: card?.scopedLimits ?? [],
                 credits: card?.credits,
-                error: usageError
+                error: card?.error
             )]
         } ?? []
 
@@ -203,99 +208,67 @@ final class CodexState: ObservableObject, ProviderSurface {
         isLoading = true
         errorMessage = nil
 
-        // Identity first: it comes from a local file and must render even if the
-        // network is unavailable.
-        let auth: CodexAuth?
-        do {
-            let loaded = try Self.loadAuth(from: selectedProfile)
-            if let active = accounts.first(where: \.isActive),
-               CodexAuthService.claims(fromIDToken: loaded.tokens.idToken)?.email != active.email {
-                throw NSError(domain: "CodexDesktop", code: 2, userInfo: [
-                    NSLocalizedDescriptionKey: "This Codex profile is signed in to a different account. Open it and sign in as \(active.email)."
-                ])
-            }
-            auth = loaded
-            let claims = CodexAuthService.claims(fromIDToken: loaded.tokens.idToken)
-            email = claims?.email
-            name = claims?.name
-            // Provisional: the live endpoint's plan is authoritative and
-            // overwrites this below. The id_token was observed reporting a
-            // stale `prolite` where the endpoint said `pro`.
-            if planType == nil { planType = claims?.planType }
-        } catch {
-            auth = nil
-            errorMessage = error.localizedDescription
-            log.error("[refresh] credentials unreadable: \(error.localizedDescription)")
+        for account in accounts {
+            await refreshLimits(for: account, force: force)
         }
-
-        await refreshLimits(auth: auth, force: force)
         await refreshCostAndActivity(notify: false)
-        syncActiveAccountFields()
-        if let activeId = accounts.first(where: \.isActive)?.id, let snapshot {
-            accountSnapshots[activeId] = snapshot
-        }
 
         lastRefresh = Date()
         isLoading = false
         didRefresh?()
     }
 
-    private func refreshLimits(auth: CodexAuth?, force: Bool) async {
-        if !force, let until = rateLimitedUntil, until > Date() {
-            log.info("[refresh] skipping limits — rate limited for \(Int(until.timeIntervalSinceNow))s more")
+    private func refreshLimits(for account: Account, force: Bool) async {
+        let id = account.id
+        var usage = accountUsage[id] ?? AccountUsage()
+        defer {
+            if accounts.contains(where: { $0.id == id }) { accountUsage[id] = usage }
+        }
+        let auth: CodexAuth
+        do {
+            auth = try Self.loadAuth(from: profiles.profile(for: id))
+        } catch {
+            usage.error = ProviderErrorModel(message: error.localizedDescription, needsReauth: true, isRateLimited: false)
+            usage.isStale = true
+            if usage.snapshot == nil { usage.snapshot = await cachedUsage(id)?.snapshot }
+            if account.isActive { errorMessage = error.localizedDescription }
             return
         }
-
-        guard let auth else {
-            await applyFallback()
+        let claims = CodexAuthService.claims(fromIDToken: auth.tokens.idToken)
+        guard claims?.email == account.email else {
+            usage = AccountUsage(error: ProviderErrorModel(
+                message: "This Codex profile is signed in to a different account. Open it and sign in as \(account.email).",
+                needsReauth: true, isRateLimited: false
+            ))
             return
         }
+        syncAccountFields(id: id, claims: claims, plan: usage.snapshot?.planType)
+        if !force, let until = usage.rateLimitedUntil, until > Date() { return }
 
         do {
-            guard let profileID = accounts.first(where: \.isActive)?.id else { return }
-            let result = try await usageService.fetchLive(
-                accessToken: auth.tokens.accessToken,
-                accountId: auth.tokens.accountId,
-                profileID: profileID
-            )
-            snapshot = result.snapshot
-            snapshotIsStale = false
-            planType = result.snapshot.planType ?? planType
-            usageError = nil
-            rateLimitedUntil = nil
+            let result = try await fetchUsage(auth, id)
+            usage = AccountUsage(snapshot: result.snapshot, isStale: result.isStale)
+            syncAccountFields(id: id, claims: claims, plan: result.snapshot.planType)
+            return
         } catch CodexUsageService.UsageError.rateLimited(let retryAfter) {
-            rateLimitedUntil = Date().addingTimeInterval(retryAfter)
-            // Keep existing numbers; a 429 blocks refresh, it does not
-            // invalidate what we already have.
-            usageError = ProviderErrorModel(
+            usage.rateLimitedUntil = Date().addingTimeInterval(retryAfter)
+            usage.error = ProviderErrorModel(
                 message: CodexUsageService.UsageError.rateLimited(retryAfter: retryAfter).localizedDescription,
                 needsReauth: false,
                 isRateLimited: true
             )
-            if snapshot == nil { await applyFallback() }
         } catch CodexUsageService.UsageError.needsReauth {
-            usageError = ProviderErrorModel(
+            usage.error = ProviderErrorModel(
                 message: CodexUsageService.UsageError.needsReauth.localizedDescription,
                 needsReauth: true,
                 isRateLimited: false
             )
-            await applyFallback()
         } catch {
-            log.warning("[refresh] live limits failed: \(error.localizedDescription)")
-            await applyFallback()
-            if snapshot == nil {
-                usageError = ProviderErrorModel(message: error.localizedDescription, needsReauth: false, isRateLimited: false)
-            }
+            usage.error = ProviderErrorModel(message: error.localizedDescription, needsReauth: false, isRateLimited: false)
         }
-    }
-
-    private func applyFallback() async {
-        guard let id = accounts.first(where: \.isActive)?.id,
-              let fallback = await usageService.localFallback(profileID: id) else { return }
-        snapshot = fallback.snapshot
-        snapshotIsStale = true
-        planType = fallback.snapshot.planType ?? planType
-        log.info("[refresh] using local snapshot from \(fallback.observedAt)")
+        usage.isStale = true
+        if usage.snapshot == nil { usage.snapshot = await cachedUsage(id)?.snapshot }
+        syncAccountFields(id: id, claims: claims, plan: usage.snapshot?.planType)
     }
 
     private func invalidateStatistics() {
@@ -343,16 +316,13 @@ final class CodexState: ObservableObject, ProviderSurface {
         log.info("[refresh] today=$\(String(format: "%.2f", costSeries.todayCost)) turns=\(activitySummary.turns)")
     }
 
-    /// Keeps the active account's persisted display fields (email/name/plan)
-    /// in step with whatever the live credentials and usage endpoint just
-    /// reported, so its row/card read correctly even before the next refresh.
-    private func syncActiveAccountFields() {
-        guard let index = accounts.firstIndex(where: \.isActive), let email else { return }
-        let displayName = name ?? email
-        guard accounts[index].email != email
-            || accounts[index].displayName != displayName
+    private func syncAccountFields(id: UUID, claims: CodexIDTokenClaims?, plan: String?) {
+        guard let index = accounts.firstIndex(where: { $0.id == id }) else { return }
+        let displayName = claims?.name ?? accounts[index].displayName
+        // Cached/live plans take precedence over potentially outdated ID-token claims.
+        let planType = plan ?? accounts[index].subscriptionType ?? claims?.planType
+        guard accounts[index].displayName != displayName
             || accounts[index].subscriptionType != planType else { return }
-        accounts[index].email = email
         accounts[index].displayName = displayName
         accounts[index].subscriptionType = planType
         CodexAccountRegistry.save(accounts, to: defaults)
@@ -583,21 +553,14 @@ final class CodexState: ObservableObject, ProviderSurface {
         accounts = CodexAccountRegistry.markActive(id: id, in: accounts)
         if let index = accounts.firstIndex(where: { $0.id == id }) { accounts[index].lastUsed = Date() }
         CodexAccountRegistry.save(accounts, to: defaults)
-        snapshot = accountSnapshots[id]
-        snapshotIsStale = snapshot != nil
-        email = nil
-        name = nil
-        planType = nil
-        usageError = nil
         desyncNotice = nil
-        rateLimitedUntil = nil
         invalidateStatistics()
     }
 
     func removeAccount(id: UUID) {
         guard !isAuthenticating, !isLoading else { return }
         accounts.removeAll { $0.id == id }
-        accountSnapshots[id] = nil
+        accountUsage[id] = nil
         CodexAccountRegistry.save(accounts, to: defaults)
         refreshBackupPresence()
         // Profile directories and legacy Keychain entries are retained, not logged out or deleted.
