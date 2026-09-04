@@ -196,7 +196,7 @@ final class CodexState: ObservableObject, ProviderSurface {
             if let active = accounts.first(where: \.isActive),
                CodexAuthService.claims(fromIDToken: loaded.tokens.idToken)?.email != active.email {
                 throw NSError(domain: "CodexDesktop", code: 2, userInfo: [
-                    NSLocalizedDescriptionKey: "This Codex profile is signed in to a different account. Open Codex and sign in to the expected account."
+                    NSLocalizedDescriptionKey: "This Codex profile is signed in to a different account. Open it and sign in as \(active.email)."
                 ])
             }
             auth = loaded
@@ -433,7 +433,7 @@ final class CodexState: ObservableObject, ProviderSurface {
             return
         }
         guard CodexAuthService.claims(fromIDToken: auth.tokens.idToken)?.email == target.email else {
-            errorMessage = "This profile is signed in to a different account. Sign in to the expected account in its Codex window."
+            errorMessage = "This profile is signed in to a different account. Sign in as \(target.email) in its Codex window."
             return
         }
         selectAccount(accountId)
@@ -514,7 +514,7 @@ final class CodexState: ObservableObject, ProviderSurface {
               let email = claims.email else { return false }
         if let existing = accounts.first(where: { $0.id == id }) {
             guard existing.email == email else {
-                errorMessage = "Login did not match the expected account. Switch accounts inside that Codex window."
+                errorMessage = "Login did not match \(existing.email). Switch accounts inside that Codex window."
                 return false
             }
         } else {

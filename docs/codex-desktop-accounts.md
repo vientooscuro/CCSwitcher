@@ -17,7 +17,7 @@ The default `codex` command continues using the default account. To use an addit
 
 ## Compatibility and verification
 
-Desktop isolation uses `CODEX_HOME`, `CODEX_ELECTRON_USER_DATA_PATH`, and `--user-data-dir`, verified with the renamed ChatGPT desktop app 26.901.22334 (bundle ID com.openai.codex). The Chromium argument is necessary before Electron startup: without it, the new process exits before creating its profile. The Electron environment setting is internal, so recheck isolation after major updates. The launcher prefers the renamed ChatGPT bundle when both versions remain installed. Instances are identified by their profile's SingletonLock and checked against the Codex bundle identifier before activation; a launch without a live profile lock reports failure.
+Desktop isolation uses `CODEX_HOME`, `CODEX_ELECTRON_USER_DATA_PATH`, and `--user-data-dir`, verified with the renamed ChatGPT desktop app 26.901.22334 (bundle ID com.openai.codex). The Chromium argument is necessary before Electron startup: without it, the new process exits before creating its profile. The Electron environment setting is internal, so recheck isolation after major updates. The launcher prefers the renamed ChatGPT bundle when both versions remain installed. Instances are identified by their profile's SingletonLock and checked against the Codex bundle identifier before activation. A launch succeeds only after that exact process has an on-screen layer-zero window; a missing process or window reports failure.
 
 Usage caches are keyed by account UUID; session statistics are read from the selected profile's sessions directory. Unscoped legacy usage caches are not used as account identity or limits.
 

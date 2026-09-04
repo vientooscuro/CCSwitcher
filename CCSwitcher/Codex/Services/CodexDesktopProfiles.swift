@@ -1,5 +1,23 @@
 import AppKit
 
+@MainActor
+enum CodexWindowVisibility {
+    static func hasVisibleWindow(processIdentifier: Int32) -> Bool {
+        let options: CGWindowListOption = [.optionAll, .excludeDesktopElements]
+        let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] ?? []
+        return hasVisibleWindow(in: windows, processIdentifier: processIdentifier)
+    }
+
+    static func hasVisibleWindow(in windows: [[String: Any]], processIdentifier: Int32) -> Bool {
+        windows.contains { window in
+            (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == processIdentifier
+                && (window[kCGWindowLayer as String] as? NSNumber)?.intValue == 0
+                && (window[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue == true
+                && ((window[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 0) > 0
+        }
+    }
+}
+
 struct CodexDesktopProfile: Equatable, Sendable {
     let home: URL
     let userData: URL
@@ -80,7 +98,7 @@ final class CodexDesktopProfiles {
         }
         // Electron's lock identifies the exact profile even after CCSwitcher restarts.
         if let running = runningInstance(for: profile) {
-            running.activate(options: [.activateAllWindows])
+            try await activateAndWaitForWindow(running)
             return
         }
         let configuration = NSWorkspace.OpenConfiguration()
@@ -88,13 +106,39 @@ final class CodexDesktopProfiles {
         // Chromium checks its native singleton before Electron reads the environment.
         configuration.arguments = profile.launchArguments
         configuration.environment = profile.environment(inheriting: ProcessInfo.processInfo.environment)
-        _ = try await NSWorkspace.shared.openApplication(at: applicationURL, configuration: configuration)
-        for _ in 0..<50 {
-            if runningInstance(for: profile) != nil { return }
+        let launched = try await NSWorkspace.shared.openApplication(at: applicationURL, configuration: configuration)
+        var detected: NSRunningApplication?
+        for _ in 0..<100 {
+            if let running = runningInstance(for: profile) {
+                detected = running
+                running.activate(options: [.activateAllWindows])
+                if CodexWindowVisibility.hasVisibleWindow(processIdentifier: running.processIdentifier) {
+                    running.activate(options: [.activateAllWindows])
+                    return
+                }
+            }
+            if launched.isTerminated { break }
             try await Task.sleep(for: .milliseconds(100))
         }
         throw NSError(domain: "CodexDesktop", code: 3, userInfo: [
-            NSLocalizedDescriptionKey: "Codex did not start the isolated profile. Your existing login is unchanged."
+            NSLocalizedDescriptionKey: detected == nil
+                ? "Codex did not start the isolated profile. Your existing login is unchanged."
+                : "Codex started the isolated profile but did not show its window. Try Open Codex again."
+        ])
+    }
+
+    private static func activateAndWaitForWindow(_ running: NSRunningApplication) async throws {
+        running.activate(options: [.activateAllWindows])
+        for _ in 0..<100 {
+            guard !running.isTerminated else { break }
+            if CodexWindowVisibility.hasVisibleWindow(processIdentifier: running.processIdentifier) {
+                running.activate(options: [.activateAllWindows])
+                return
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw NSError(domain: "CodexDesktop", code: 4, userInfo: [
+            NSLocalizedDescriptionKey: "The isolated Codex process is running but its window could not be shown."
         ])
     }
 

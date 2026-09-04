@@ -133,6 +133,7 @@ final class CodexDesktopProfilesTests: XCTestCase {
         XCTAssertFalse(state.acceptLoginIfReady(id: expected.id))
         XCTAssertEqual(state.accounts.first?.email, expected.email)
         XCTAssertFalse(state.accounts.first!.isActive)
+        XCTAssertTrue(state.errorMessage?.contains(expected.email) == true)
     }
 
     func testFailedDesktopLaunchDoesNotSelectTargetOrWriteAuth() async throws {
@@ -233,5 +234,29 @@ final class CodexDesktopProfilesTests: XCTestCase {
         state.reconcileDefaultProfile()
         XCTAssertNil(profiles.defaultAccountID)
         XCTAssertEqual(state.selectedProfile, isolated)
+    }
+
+    func testWindowProbeRequiresAnOnScreenLayerZeroWindowForTheExactProcess() {
+        let hidden: [String: Any] = [
+            kCGWindowOwnerPID as String: 42,
+            kCGWindowLayer as String: 0,
+            kCGWindowIsOnscreen as String: false,
+            kCGWindowAlpha as String: 1.0
+        ]
+        let otherProcess: [String: Any] = [
+            kCGWindowOwnerPID as String: 7,
+            kCGWindowLayer as String: 0,
+            kCGWindowIsOnscreen as String: true,
+            kCGWindowAlpha as String: 1.0
+        ]
+        let visible: [String: Any] = [
+            kCGWindowOwnerPID as String: 42,
+            kCGWindowLayer as String: 0,
+            kCGWindowIsOnscreen as String: true,
+            kCGWindowAlpha as String: 1.0
+        ]
+
+        XCTAssertFalse(CodexWindowVisibility.hasVisibleWindow(in: [hidden, otherProcess], processIdentifier: 42))
+        XCTAssertTrue(CodexWindowVisibility.hasVisibleWindow(in: [hidden, visible], processIdentifier: 42))
     }
 }
