@@ -55,80 +55,99 @@ struct AccountSwitcherView: View {
     // MARK: - Account Row
 
     private func accountRow(_ row: AccountRowModel) -> some View {
-        HStack(spacing: 12) {
-            // Provider icon
+        HStack(alignment: .center, spacing: 12) {
             ProviderIcon(provider: hub.activeProvider, size: 22)
                 .foregroundStyle(row.isActive ? theme.accent : .secondary)
                 .frame(width: 32, height: 32)
 
-            // Account info
-            VStack(alignment: .leading, spacing: 2) {
-                if editingAccountId == row.id {
-                    HStack(spacing: 4) {
-                        TextField("Custom label", text: $editingLabel)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.subheadline)
-                            .onSubmit { commitLabelEdit(row) }
+            accountIdentity(row)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-                        Button {
-                            commitLabelEdit(row)
-                        } label: {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundStyle(.green)
-                        }
-                        .buttonStyle(.plain)
+            accountActions(row)
+                .fixedSize(horizontal: true, vertical: false)
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(row.isActive ? theme.cardFillStrong : theme.cardFill)
+                .strokeBorder(row.isActive ? theme.accent.opacity(0.35) : theme.cardBorder, lineWidth: 1)
+                .shadow(color: AppStyle.cardShadowColor, radius: AppStyle.cardShadowRadius, x: 0, y: AppStyle.cardShadowY)
+        )
+    }
 
+    @ViewBuilder
+    private func accountIdentity(_ row: AccountRowModel) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if editingAccountId == row.id {
+                HStack(spacing: 5) {
+                    TextField("Custom label", text: $editingLabel)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.subheadline)
+                        .onSubmit { commitLabelEdit(row) }
+
+                    Button {
+                        commitLabelEdit(row)
+                    } label: {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        editingAccountId = nil
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(theme.textSecondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            } else {
+                HStack(spacing: 6) {
+                    Text(row.title)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .layoutPriority(1)
+
+                    if hub.surface.capabilities.managesAccounts {
                         Button {
-                            editingAccountId = nil
+                            editingLabel = row.rawLabel ?? ""
+                            editingAccountId = row.id
                         } label: {
-                            Image(systemName: "xmark.circle.fill")
+                            Image(systemName: "pencil")
+                                .font(.caption2)
                                 .foregroundStyle(theme.textSecondary)
                         }
                         .buttonStyle(.plain)
+                        .help("Edit label")
                     }
-                } else {
-                    HStack(spacing: 6) {
-                        Text(row.title)
-                            .font(.subheadline.weight(.medium))
 
-                        if hub.surface.capabilities.managesAccounts {
-                            Button {
-                                editingLabel = row.rawLabel ?? ""
-                                editingAccountId = row.id
-                            } label: {
-                                Image(systemName: "pencil")
-                                    .font(.caption2)
-                                    .foregroundStyle(theme.textSecondary)
-                            }
-                            .buttonStyle(.plain)
-                            .help("Edit label")
-                        }
-
-                        if row.isActive {
-                            Badge(text: String(localized: "Active", bundle: L10n.bundle), color: .green)
-                        }
+                    if row.isActive {
+                        Badge(text: String(localized: "Active", bundle: L10n.bundle), color: .green)
                     }
-                }
-
-                Text(row.email)
-                    .font(.caption)
-                    .foregroundStyle(theme.textSecondary)
-
-                HStack(spacing: 8) {
-                    if let sub = row.planBadge {
-                        Label(sub, systemImage: "creditcard")
-                            .font(.caption2)
-                            .foregroundStyle(theme.textSecondary)
-                    }
-                    Text(hub.activeProvider.rawValue)
-                        .font(.caption2)
-                        .foregroundStyle(theme.textSecondary)
                 }
             }
 
-            Spacer()
+            Text(row.email)
+                .font(.caption)
+                .foregroundStyle(theme.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
 
-            // Actions
+            HStack(spacing: 4) {
+                Image(systemName: "creditcard")
+                    .imageScale(.small)
+                Text(([row.planBadge, hub.activeProvider.rawValue].compactMap { $0 }).joined(separator: " · "))
+            }
+            .font(.caption2)
+            .foregroundStyle(theme.textSecondary)
+            .lineLimit(1)
+        }
+    }
+
+    @ViewBuilder
+    private func accountActions(_ row: AccountRowModel) -> some View {
+        HStack(spacing: 12) {
             if hub.surface.capabilities.canSwitchAccounts, !row.isActive || hub.activeProvider == .codex {
                 Button(hub.activeProvider == .codex ? "Open Codex" : "Switch") {
                     Task { await hub.surface.switchTo(accountId: row.id) }
@@ -163,13 +182,6 @@ struct AccountSwitcherView: View {
                 .help("Remove account")
             }
         }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(row.isActive ? theme.cardFillStrong : .clear)
-                .strokeBorder(theme.cardBorder, lineWidth: 1)
-                .shadow(color: AppStyle.cardShadowColor, radius: AppStyle.cardShadowRadius, x: 0, y: AppStyle.cardShadowY)
-        )
     }
 
     private func commitLabelEdit(_ row: AccountRowModel) {

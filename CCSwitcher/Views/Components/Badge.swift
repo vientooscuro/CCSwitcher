@@ -13,6 +13,8 @@ struct Badge: View {
         Text(text)
             .font(.caption2.weight(.semibold))
             .foregroundStyle(foreground)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
             .padding(.horizontal, AppStyle.badgeHPadding)
             .padding(.vertical, AppStyle.badgeVPadding)
             .background(color, in: Capsule())
