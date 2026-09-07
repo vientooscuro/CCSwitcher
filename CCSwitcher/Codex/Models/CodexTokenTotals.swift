@@ -1,5 +1,20 @@
 import Foundation
 
+enum OpenAIServiceTier: String, Codable, Sendable, Hashable {
+    case standard
+    case priority
+    case flex
+    case unknown
+
+    init(rawValueOrUnknown value: String?) {
+        switch value {
+        case "default": self = .standard
+        case let value?: self = Self(rawValue: value) ?? .unknown
+        case nil: self = .unknown
+        }
+    }
+}
+
 /// Token counters as Codex reports them. `inputTokens` is inclusive of
 /// `cachedInputTokens`, and `outputTokens` is inclusive of reasoning tokens —
 /// see `LiteLLMModelPricing.openAICost` for why both matter.
@@ -80,14 +95,16 @@ struct CodexUsageEvent: Codable, Sendable {
     var cumulative: CodexTokenTotals
     var delta: CodexTokenTotals
     var requestScope: String?
+    var serviceTier: OpenAIServiceTier
 
-    init(timestamp: Double, day: String, model: String, cumulative: CodexTokenTotals, delta: CodexTokenTotals, requestScope: String? = nil) {
+    init(timestamp: Double, day: String, model: String, cumulative: CodexTokenTotals, delta: CodexTokenTotals, requestScope: String? = nil, serviceTier: OpenAIServiceTier = .unknown) {
         self.timestamp = timestamp
         self.day = day
         self.model = model
         self.cumulative = cumulative
         self.delta = delta
         self.requestScope = requestScope
+        self.serviceTier = serviceTier
     }
 
     // Millions of replayed events make repeated JSON keys materially expensive.
@@ -99,6 +116,7 @@ struct CodexUsageEvent: Codable, Sendable {
         cumulative = try values.decode(CodexTokenTotals.self)
         delta = try values.decode(CodexTokenTotals.self)
         requestScope = values.isAtEnd ? nil : try values.decodeIfPresent(String.self)
+        serviceTier = values.isAtEnd ? .unknown : try values.decode(OpenAIServiceTier.self)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -109,6 +127,7 @@ struct CodexUsageEvent: Codable, Sendable {
         try values.encode(cumulative)
         try values.encode(delta)
         try values.encode(requestScope)
+        try values.encode(serviceTier)
     }
 }
 

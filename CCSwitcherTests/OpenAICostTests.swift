@@ -3,6 +3,11 @@ import XCTest
 
 final class OpenAICostTests: XCTestCase {
 
+    func testDefaultTierMapsToStandardAndAutoStaysUnknown() {
+        XCTAssertEqual(OpenAIServiceTier(rawValueOrUnknown: "default"), .standard)
+        XCTAssertEqual(OpenAIServiceTier(rawValueOrUnknown: "auto"), .unknown)
+    }
+
     /// gpt-5.6-sol rates from LiteLLM, in dollars per token.
     private let sol = LiteLLMModelPricing(
         inputPerToken: 5e-06,
@@ -14,7 +19,15 @@ final class OpenAICostTests: XCTestCase {
         outputAbove200k: nil,
         cacheCreateAbove200k: nil,
         cacheReadAbove200k: nil,
-        fastMultiplier: nil
+        fastMultiplier: nil,
+        openAI: .init(
+            longContextThreshold: 272_000,
+            standardLongContext: .init(input: 8e-06, output: 3e-05, cacheCreate: 1e-05, cacheRead: 8e-07),
+            priority: .init(input: 8e-06, output: 4e-05, cacheCreate: 1e-05, cacheRead: 8e-07),
+            priorityLongContext: .init(input: 16e-06, output: 6e-05, cacheCreate: 2e-05, cacheRead: 1.6e-06),
+            flex: .init(input: 2e-06, output: 1e-05, cacheCreate: 2.5e-06, cacheRead: 2e-07),
+            flexLongContext: .init(input: 4e-06, output: 1.5e-05, cacheCreate: 5e-06, cacheRead: 4e-07)
+        )
     )
 
     /// OpenAI reports `input_tokens` inclusive of `cached_input_tokens`, so the
@@ -58,10 +71,31 @@ final class OpenAICostTests: XCTestCase {
             cacheWriteTokens: 0,
             outputTokens: 213_171
         )
-        let expected = Double(54_774_121 - 52_989_696) * 5e-06
-            + 52_989_696 * 5e-07
+        let expected = Double(54_774_121 - 52_989_696) * 8e-06
+            + 52_989_696 * 8e-07
             + 213_171 * 3e-05
         XCTAssertEqual(cost, expected, accuracy: 1e-9)
+    }
+
+    func testLongContextRateAppliesToEntireRequest() {
+        let cost = sol.openAICost(
+            inputTokens: 300_000, cachedInputTokens: 200_000,
+            cacheWriteTokens: 0, outputTokens: 1_000, serviceTier: .standard
+        )
+        XCTAssertEqual(cost, 100_000 * 8e-06 + 200_000 * 8e-07 + 1_000 * 3e-05, accuracy: 1e-12)
+    }
+
+    func testPriorityAndFlexUseRequestTierRates() {
+        let priority = sol.openAICost(
+            inputTokens: 1_000, cachedInputTokens: 500,
+            cacheWriteTokens: 0, outputTokens: 100, serviceTier: .priority
+        )
+        let flex = sol.openAICost(
+            inputTokens: 1_000, cachedInputTokens: 500,
+            cacheWriteTokens: 0, outputTokens: 100, serviceTier: .flex
+        )
+        XCTAssertEqual(priority, 500 * 8e-06 + 500 * 8e-07 + 100 * 4e-05, accuracy: 1e-12)
+        XCTAssertEqual(flex, 500 * 2e-06 + 500 * 2e-07 + 100 * 1e-05, accuracy: 1e-12)
     }
 
     // MARK: - Model resolution
@@ -74,6 +108,17 @@ final class OpenAICostTests: XCTestCase {
             XCTAssertNotNil(pricing, "no pricing row for \(model)")
             XCTAssertGreaterThan(pricing?.inputPerToken ?? 0, 0, "zero input rate for \(model)")
         }
+    }
+
+    func testBundledTableResolvesAstraExactly() async {
+        let pricing = await PricingService.shared.pricing(for: "gpt-6-astra")
+        XCTAssertEqual(pricing?.inputPerToken, 10e-06)
+        XCTAssertEqual(pricing?.outputPerToken, 50e-06)
+    }
+
+    func testSparkDoesNotFuzzyResolveToCodex() async {
+        let pricing = await PricingService.shared.pricing(for: "gpt-5.3-codex-spark")
+        XCTAssertNil(pricing)
     }
 
     func testBundledTableStillResolvesClaudeModels() async {

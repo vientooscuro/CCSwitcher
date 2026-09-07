@@ -107,6 +107,9 @@ enum CodexRolloutParser {
                           let raw = info["total_token_usage"] as? [String: Any],
                           let timestamp else { break }
                     let cumulative = totals(fromTotalUsage: raw)
+                    let serviceTier = OpenAIServiceTier(rawValueOrUnknown:
+                        (info["service_tier"] as? String) ?? (payload["service_tier"] as? String)
+                    )
                     let day = Formatters.isoDay.string(from: timestamp)
                     defer {
                         previous = cumulative
@@ -129,7 +132,8 @@ enum CodexRolloutParser {
                     guard let delta else { break }
                     let usage = CodexUsageEvent(
                         timestamp: timestamp.timeIntervalSince1970, day: day,
-                        model: currentModel ?? "unknown", cumulative: cumulative, delta: delta, requestScope: requestScope
+                        model: currentModel ?? "unknown", cumulative: cumulative, delta: delta,
+                        requestScope: requestScope, serviceTier: serviceTier
                     )
                     if currentModel != nil {
                         aggregate.usageEvents.append(usage)

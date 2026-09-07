@@ -24,6 +24,7 @@ struct CostSeriesModel {
     let todayCost: Double
     let daily: [DailyCostEntry]
     var unpricedModels: [String] = []
+    var hasUnknownServiceTiers = false
 
     var totalCost: Double { daily.reduce(0) { $0 + $1.cost } }
 

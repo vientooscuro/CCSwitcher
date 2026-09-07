@@ -153,7 +153,7 @@ actor CodexSessionCache {
     /// rates into one answer.
     func costSeries() async -> CostSeriesModel {
         ensureLoaded()
-        let tokensByDayAndModel = Self.mergedTokensByDayAndModel(from: Array(files.values))
+        let usageEvents = Self.mergedUsageEvents(from: Array(files.values))
 
         // Copied/resumed files do not create extra sessions in the history.
         var byDate: [String: (cost: Double, models: [String: Double], totals: CodexTokenTotals, sessions: Int)] = [:]
@@ -168,25 +168,25 @@ actor CodexSessionCache {
         }
 
         var modelIds: Set<String> = []
-        for (_, models) in tokensByDayAndModel { modelIds.formUnion(models.keys) }
+        modelIds.formUnion(usageEvents.map(\.model))
 
         let pricingService = PricingService.shared
         await pricingService.ensureLoaded()
         let prices = await pricingService.prices(for: Array(modelIds))
 
-        for (date, models) in tokensByDayAndModel {
+        for event in usageEvents {
+            let date = event.day
             var entry = byDate[date] ?? (0, [:], CodexTokenTotals(), 0)
-            for (model, totals) in models {
-                let cost = (prices[model] ?? nil)?.openAICost(
-                    inputTokens: totals.inputTokens,
-                    cachedInputTokens: totals.cachedInputTokens,
-                    cacheWriteTokens: totals.cacheWriteTokens,
-                    outputTokens: totals.outputTokens
-                ) ?? 0
-                entry.cost += cost
-                entry.models[model, default: 0] += cost
-                entry.totals = entry.totals + totals
-            }
+            let cost = (prices[event.model] ?? nil)?.openAICost(
+                inputTokens: event.delta.inputTokens,
+                cachedInputTokens: event.delta.cachedInputTokens,
+                cacheWriteTokens: event.delta.cacheWriteTokens,
+                outputTokens: event.delta.outputTokens,
+                serviceTier: event.serviceTier
+            ) ?? 0
+            entry.cost += cost
+            entry.models[event.model, default: 0] += cost
+            entry.totals = entry.totals + event.delta
             byDate[date] = entry
         }
 
@@ -207,12 +207,27 @@ actor CodexSessionCache {
             .sorted { $0.date > $1.date }
 
         let unpriced = modelIds.filter { (prices[$0] ?? nil) == nil }.sorted()
-        return CostSeriesModel(todayCost: byDate[today]?.cost ?? 0, daily: daily, unpricedModels: unpriced)
+        return CostSeriesModel(
+            todayCost: byDate[today]?.cost ?? 0,
+            daily: daily,
+            unpricedModels: unpriced,
+            hasUnknownServiceTiers: usageEvents.contains { $0.serviceTier == .unknown }
+        )
     }
 
     /// Deduplicate replayed events, not whole counter curves: agents sharing
     /// a session ID still have independent request usage and counter resets.
     static func mergedTokensByDayAndModel(from aggregates: [CodexRolloutAggregate]) -> [String: [String: CodexTokenTotals]] {
+        let requests = mergedUsageEvents(from: aggregates)
+        var result: [String: [String: CodexTokenTotals]] = [:]
+        for event in requests {
+            result[event.day, default: [:]][event.model, default: CodexTokenTotals()] =
+                (result[event.day]?[event.model] ?? CodexTokenTotals()) + event.delta
+        }
+        return result
+    }
+
+    static func mergedUsageEvents(from aggregates: [CodexRolloutAggregate]) -> [CodexUsageEvent] {
         struct EventKey: Hashable {
             let session: String
             let scope: String?
@@ -235,6 +250,9 @@ actor CodexSessionCache {
                     }
                     if existing.model == "unknown" || (event.model != "unknown" && event.model < existing.model) {
                         existing.model = event.model
+                    }
+                    if existing.serviceTier == .unknown, event.serviceTier != .unknown {
+                        existing.serviceTier = event.serviceTier
                     }
                     events[key] = existing
                     continue
@@ -261,17 +279,15 @@ actor CodexSessionCache {
                 if existing.model == "unknown" || (event.model != "unknown" && event.model < existing.model) {
                     existing.model = event.model
                 }
+                if existing.serviceTier == .unknown, event.serviceTier != .unknown {
+                    existing.serviceTier = event.serviceTier
+                }
                 requests[requestKey] = existing
             } else {
                 requests[requestKey] = event
             }
         }
-        var result: [String: [String: CodexTokenTotals]] = [:]
-        for event in requests.values {
-            result[event.day, default: [:]][event.model, default: CodexTokenTotals()] =
-                (result[event.day]?[event.model] ?? CodexTokenTotals()) + event.delta
-        }
-        return result
+        return Array(requests.values)
     }
 
     /// Legacy activity heuristic: collapses replays that preserve timestamps

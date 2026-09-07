@@ -2,6 +2,18 @@ import XCTest
 @testable import CCSwitcher
 
 final class CodexRolloutParserTests: XCTestCase {
+    func testTokenEventPreservesRequestServiceTier() throws {
+        let text = """
+        {"type":"session_meta","payload":{"id":"session"}}
+        {"type":"turn_context","payload":{"turn_id":"turn","model":"gpt-5.4"}}
+        {"timestamp":"2026-09-07T12:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"service_tier":"priority","total_token_usage":{"input_tokens":300000,"cached_input_tokens":200000,"output_tokens":1000},"last_token_usage":{"input_tokens":300000,"cached_input_tokens":200000,"output_tokens":1000}}}}
+        """
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        let aggregate = try XCTUnwrap(CodexRolloutParser.parse(contentsOf: url.path, relativePath: "tier.jsonl", mtime: 1))
+        XCTAssertEqual(aggregate.usageEvents.first?.serviceTier, .priority)
+    }
 
     private func parseFixture() throws -> CodexRolloutAggregate {
         let bundle = Bundle(for: Self.self)

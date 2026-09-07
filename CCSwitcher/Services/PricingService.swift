@@ -14,6 +14,22 @@ private let log = FileLog("Pricing")
 /// `usage.speed == "fast"`. Most rows in real data have `speed == "standard"`,
 /// so the multiplier is rarely exercised — but it's a real billing line.
 struct LiteLLMModelPricing: Sendable {
+    struct OpenAIRates: Sendable {
+        let input: Double
+        let output: Double
+        let cacheCreate: Double
+        let cacheRead: Double
+    }
+
+    struct OpenAIPricing: Sendable {
+        let longContextThreshold: Int
+        let standardLongContext: OpenAIRates?
+        let priority: OpenAIRates?
+        let priorityLongContext: OpenAIRates?
+        let flex: OpenAIRates?
+        let flexLongContext: OpenAIRates?
+    }
+
     let inputPerToken: Double
     let outputPerToken: Double
     let cacheCreatePerToken: Double
@@ -25,6 +41,7 @@ struct LiteLLMModelPricing: Sendable {
     let cacheCreateAbove200k: Double?
     let cacheReadAbove200k: Double?
     let fastMultiplier: Double?
+    var openAI: OpenAIPricing? = nil
 
     func cost(input: Int, output: Int, cacheCreate: Int, cacheCreate1h: Int, cacheRead: Int, isFast: Bool) -> Double {
         // Cache-creation cost: 1-hour-TTL writes (cacheCreate1h) bill at the higher
@@ -65,13 +82,21 @@ struct LiteLLMModelPricing: Sendable {
     ///   3. Cache writes are free and the counter is zero in practice; a
     ///      non-zero value bills at the creation rate when the model defines one.
     /// No 200k tier and no fast multiplier apply to OpenAI models.
-    func openAICost(inputTokens: Int, cachedInputTokens: Int, cacheWriteTokens: Int, outputTokens: Int) -> Double {
+    func openAICost(inputTokens: Int, cachedInputTokens: Int, cacheWriteTokens: Int, outputTokens: Int, serviceTier: OpenAIServiceTier = .standard) -> Double {
         let cached = min(max(cachedInputTokens, 0), max(inputTokens, 0))
         let fresh = max(inputTokens, 0) - cached
-        return Double(fresh) * inputPerToken
-            + Double(cached) * cacheReadPerToken
-            + Double(max(cacheWriteTokens, 0)) * cacheCreatePerToken
-            + Double(max(outputTokens, 0)) * outputPerToken
+        let base = OpenAIRates(input: inputPerToken, output: outputPerToken, cacheCreate: cacheCreatePerToken, cacheRead: cacheReadPerToken)
+        let isLong = inputTokens > (openAI?.longContextThreshold ?? .max)
+        let rates: OpenAIRates
+        switch serviceTier {
+        case .priority: rates = (isLong ? openAI?.priorityLongContext : openAI?.priority) ?? base
+        case .flex: rates = (isLong ? openAI?.flexLongContext : openAI?.flex) ?? base
+        case .standard, .unknown: rates = (isLong ? openAI?.standardLongContext : nil) ?? base
+        }
+        return Double(fresh) * rates.input
+            + Double(cached) * rates.cacheRead
+            + Double(max(cacheWriteTokens, 0)) * rates.cacheCreate
+            + Double(max(outputTokens, 0)) * rates.output
     }
 }
 
@@ -118,6 +143,26 @@ actor PricingService {
         let cache_creation_input_token_cost_above_200k_tokens: Double?
         let cache_read_input_token_cost_above_200k_tokens: Double?
         let cache_creation_input_token_cost_above_1hr: Double?
+        let input_cost_per_token_above_272k_tokens: Double?
+        let output_cost_per_token_above_272k_tokens: Double?
+        let cache_creation_input_token_cost_above_272k_tokens: Double?
+        let cache_read_input_token_cost_above_272k_tokens: Double?
+        let input_cost_per_token_priority: Double?
+        let output_cost_per_token_priority: Double?
+        let cache_creation_input_token_cost_priority: Double?
+        let cache_read_input_token_cost_priority: Double?
+        let input_cost_per_token_above_272k_tokens_priority: Double?
+        let output_cost_per_token_above_272k_tokens_priority: Double?
+        let cache_creation_input_token_cost_above_272k_tokens_priority: Double?
+        let cache_read_input_token_cost_above_272k_tokens_priority: Double?
+        let input_cost_per_token_flex: Double?
+        let output_cost_per_token_flex: Double?
+        let cache_creation_input_token_cost_flex: Double?
+        let cache_read_input_token_cost_flex: Double?
+        let input_cost_per_token_above_272k_tokens_flex: Double?
+        let output_cost_per_token_above_272k_tokens_flex: Double?
+        let cache_creation_input_token_cost_above_272k_tokens_flex: Double?
+        let cache_read_input_token_cost_above_272k_tokens_flex: Double?
         let provider_specific_entry: ProviderEntry?
 
         struct ProviderEntry: Decodable {
@@ -136,6 +181,18 @@ actor PricingService {
             // omits it for others (e.g. claude-sonnet-4-6); ccusage applies the
             // 2x-input rule universally, so fall back to it when absent.
             let cw1h: Double? = cache_creation_input_token_cost_above_1hr ?? (input > 0 ? input * 2 : nil)
+            func rates(_ input: Double?, _ output: Double?, _ create: Double?, _ read: Double?) -> LiteLLMModelPricing.OpenAIRates? {
+                guard let input, let output else { return nil }
+                return .init(input: input, output: output, cacheCreate: create ?? 0, cacheRead: read ?? 0)
+            }
+            let openAI = LiteLLMModelPricing.OpenAIPricing(
+                longContextThreshold: 272_000,
+                standardLongContext: rates(input_cost_per_token_above_272k_tokens, output_cost_per_token_above_272k_tokens, cache_creation_input_token_cost_above_272k_tokens, cache_read_input_token_cost_above_272k_tokens),
+                priority: rates(input_cost_per_token_priority, output_cost_per_token_priority, cache_creation_input_token_cost_priority, cache_read_input_token_cost_priority),
+                priorityLongContext: rates(input_cost_per_token_above_272k_tokens_priority, output_cost_per_token_above_272k_tokens_priority, cache_creation_input_token_cost_above_272k_tokens_priority, cache_read_input_token_cost_above_272k_tokens_priority),
+                flex: rates(input_cost_per_token_flex, output_cost_per_token_flex, cache_creation_input_token_cost_flex, cache_read_input_token_cost_flex),
+                flexLongContext: rates(input_cost_per_token_above_272k_tokens_flex, output_cost_per_token_above_272k_tokens_flex, cache_creation_input_token_cost_above_272k_tokens_flex, cache_read_input_token_cost_above_272k_tokens_flex)
+            )
             return LiteLLMModelPricing(
                 inputPerToken: input, outputPerToken: output,
                 cacheCreatePerToken: cw, cacheCreate1hPerToken: cw1h, cacheReadPerToken: cr,
@@ -143,7 +200,8 @@ actor PricingService {
                 outputAbove200k: output_cost_per_token_above_200k_tokens,
                 cacheCreateAbove200k: cache_creation_input_token_cost_above_200k_tokens,
                 cacheReadAbove200k: cache_read_input_token_cost_above_200k_tokens,
-                fastMultiplier: provider_specific_entry?.fast
+                fastMultiplier: provider_specific_entry?.fast,
+                openAI: openAI
             )
         }
     }
@@ -259,16 +317,14 @@ actor PricingService {
         for prefix in ["anthropic/", "anthropic.", "openai/"] {
             if let v = pricing[prefix + model] { return v }
         }
-        // Fuzzy: longest prefix match in either direction. Handles dated
-        // suffixes like "claude-sonnet-4-5-20250929" → "claude-sonnet-4-5".
-        var best: (String, LiteLLMModelPricing)?
-        for (k, v) in pricing {
-            if (model.hasPrefix(k) || k.hasPrefix(model))
-                && (best == nil || k.count > best!.0.count) {
-                best = (k, v)
+        if let range = model.range(of: #"-\d{8}$"#, options: .regularExpression) {
+            let undated = String(model[..<range.lowerBound])
+            if let exact = pricing[undated] { return exact }
+            for prefix in ["anthropic/", "anthropic.", "openai/"] {
+                if let value = pricing[prefix + undated] { return value }
             }
         }
-        return best?.1
+        return nil
     }
 
     /// Resolve prices for many models in a single actor hop. Batch callers
@@ -435,7 +491,7 @@ actor PricingService {
 
     private static func isOpenAICodex(_ name: String) -> Bool {
         let bare = name.split(separator: "/").last.map(String.init) ?? name
-        return bare.hasPrefix("gpt-5")
+        return bare.hasPrefix("gpt-")
             || bare.hasPrefix("codex-")
             || bare.hasPrefix("o3")
             || bare.hasPrefix("o4")

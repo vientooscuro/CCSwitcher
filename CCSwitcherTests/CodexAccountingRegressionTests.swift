@@ -67,6 +67,33 @@ final class CodexAccountingRegressionTests: XCTestCase {
         }
     }
 
+    func testKnownServiceTierWinsOverUnknownReplayInEitherOrder() throws {
+        let unknown = try parse(rollout(id: "one", values: [100]))
+        var known = unknown
+        known.usageEvents = unknown.usageEvents.map {
+            var event = $0
+            event.serviceTier = .priority
+            return event
+        }
+        for files in [[known, unknown], [unknown, known]] {
+            let events = CodexSessionCache.mergedUsageEvents(from: files)
+            XCTAssertEqual(events.count, 1)
+            XCTAssertEqual(events.first?.serviceTier, .priority)
+        }
+    }
+
+    func testLongContextPricingUsesIndividualRequestsBeforeDailyAggregation() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        try rollout(id: "two-requests", values: [200_000, 400_000])
+            .write(to: home.appendingPathComponent("rollout-two-requests.jsonl"), atomically: true, encoding: .utf8)
+        let cache = CodexSessionCache(sessionRoots: [home.path], cacheURL: home.appendingPathComponent("cache.json"))
+        await cache.refreshFromFilesystem()
+        let series = await cache.costSeries()
+        XCTAssertEqual(series.totalCost, 0.55, accuracy: 1e-9)
+    }
+
     func testRepeatedFirstSnapshotOfPartialReplayIsNotAnotherRequest() throws {
         let first = rollout(id: "one", values: [100], times: [0])
         let repeated = rollout(id: "one", values: [100], times: [2])
@@ -192,6 +219,19 @@ final class CodexAccountingRegressionTests: XCTestCase {
         let series = await cache.costSeries()
         XCTAssertEqual(series.daily.first?.totalTokens, 100)
         XCTAssertEqual(series.unpricedModels, ["unpriced-model"])
+    }
+
+    func testMissingServiceTierMarksEstimateIncomplete() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        try rollout(id: "unknown-tier", values: [100])
+            .write(to: home.appendingPathComponent("rollout-unknown-tier.jsonl"), atomically: true, encoding: .utf8)
+        let cache = CodexSessionCache(sessionRoots: [home.path], cacheURL: home.appendingPathComponent("cache.json"))
+        await cache.refreshFromFilesystem()
+        let series = await cache.costSeries()
+        XCTAssertTrue(series.hasUnknownServiceTiers)
+        XCTAssertEqual(series.daily.first?.totalTokens, 100)
     }
 
     @MainActor
