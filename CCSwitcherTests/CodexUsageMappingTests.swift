@@ -23,6 +23,18 @@ final class CodexUsageMappingTests: XCTestCase {
         XCTAssertEqual(usage.additionalRateLimits?.count, 1)
     }
 
+    func testOptionalPayloadDriftPreservesRateLimits() throws {
+        let json = #"{"plan_type":"team","rate_limit":{"primary_window":{"used_percent":"100","limit_window_seconds":"604800","reset_at":1786033302}},"additional_rate_limits":["unsupported",{"limit_name":"GPT-5","rate_limit":{"primary_window":{"used_percent":12,"limit_window_seconds":18000}}}],"credits":{"has_credits":false,"balance":0}}"#
+
+        let usage = try JSONDecoder().decode(CodexUsageResponse.self, from: Data(json.utf8))
+
+        XCTAssertEqual(usage.planType, "team")
+        XCTAssertEqual(usage.rateLimit?.primaryWindow?.usedPercent, 100)
+        XCTAssertEqual(usage.rateLimit?.primaryWindow?.limitWindowSeconds, 604_800)
+        XCTAssertEqual(usage.additionalRateLimits?.count, 1)
+        XCTAssertEqual(usage.credits?.balance, "0")
+    }
+
     /// The 7-day window arrived in the `primary` slot on the real account, so
     /// classification must key off duration, never off slot name.
     func testPrimarySevenDayWindowMapsToWeekly() throws {
