@@ -258,6 +258,12 @@ struct CostDetailView: View {
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                if hub.activeProvider == .codex, hub.surface.cost.hasUnknownServiceTiers {
+                    Text("Estimate uses standard rates where session logs do not identify the request service tier.")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 Text(hub.activeProvider == .codex
                      ? "Estimated API-equivalent cost from local Codex session logs, including archives. This is not your subscription charge. Historical usage before profile isolation cannot be reliably split between accounts."
                      : "Cost is computed from your local Claude Code session logs (jsonl files) under ~/.claude/projects/.")
