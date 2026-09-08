@@ -73,7 +73,9 @@ struct CCSwitcherApp: App {
                     )
                     // Kick off background usage tracking immediately upon app start
                     Task {
-                        await appState.refresh()
+                        await appState.refresh(
+                            force: providerHub.activeProvider == .claudeCode && !appState.hasStatisticsSnapshot
+                        )
                         appState.startAutoRefresh(interval: refreshInterval)
                         providerHub.startPeriodicRefresh(interval: refreshInterval)
                         // Claude is refreshed unconditionally above because the

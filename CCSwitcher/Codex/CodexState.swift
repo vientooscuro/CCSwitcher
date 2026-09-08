@@ -31,6 +31,8 @@ final class CodexState: ObservableObject, ProviderSurface {
     }
     @Published private(set) var isStatisticsLoading = false
     private var statisticsGeneration = UUID()
+    private(set) var hasStatisticsSnapshot = false
+    var needsInitialStatisticsRefresh: Bool { !hasStatisticsSnapshot }
     /// Set when the live `auth.json` fingerprint matches no known account —
     /// surfaced on the active account's card until the user imports it.
     @Published private var desyncNotice: String?
@@ -48,6 +50,7 @@ final class CodexState: ObservableObject, ProviderSurface {
 
     private let fetchUsage: @MainActor (CodexAuth, UUID) async throws -> CodexUsageService.Result
     private let cachedUsage: @MainActor (UUID) async -> CodexUsageService.Result?
+    private let loadWidgetData: (String) -> WidgetData?
     private var profileSessionCaches: [String: CodexSessionCache] = [:]
     private let defaults: UserDefaults
     let profiles: CodexDesktopProfiles
@@ -76,7 +79,8 @@ final class CodexState: ObservableObject, ProviderSurface {
         },
         cachedUsage: @escaping @MainActor (UUID) async -> CodexUsageService.Result? = { id in
             CodexUsageService.shared.localFallback(profileID: id)
-        }
+        },
+        loadWidgetData: @escaping (String) -> WidgetData? = { WidgetData.load(provider: $0) }
     ) {
         self.defaults = defaults
         self.profiles = profiles ?? CodexDesktopProfiles(defaults: defaults)
@@ -85,6 +89,7 @@ final class CodexState: ObservableObject, ProviderSurface {
         self.saveCLIBackup = saveCLIBackup
         self.fetchUsage = fetchUsage
         self.cachedUsage = cachedUsage
+        self.loadWidgetData = loadWidgetData
         statisticsScope = defaults.string(forKey: "codexStatisticsScope").flatMap(CodexStatisticsScope.init(rawValue:)) ?? .allProfiles
         accounts = CodexAccountRegistry.load(from: defaults)
         hydrateFromWidgetCache()
@@ -223,7 +228,7 @@ final class CodexState: ObservableObject, ProviderSurface {
             await refreshLimits(for: account, force: force)
         }
         isLoading = false
-        if force {
+        if force || needsInitialStatisticsRefresh {
             await refreshCostAndActivity(notify: false)
         }
 
@@ -324,6 +329,7 @@ final class CodexState: ObservableObject, ProviderSurface {
         guard statisticsGeneration == generation, statisticsScope == scope, selectedProfile == profile else { return }
         costSeries = cost
         activitySummary = activity
+        hasStatisticsSnapshot = true
         if notify { didRefresh?() }
         log.info("[refresh] today=$\(String(format: "%.2f", costSeries.todayCost)) turns=\(activitySummary.turns)")
     }
@@ -342,7 +348,8 @@ final class CodexState: ObservableObject, ProviderSurface {
     }
 
     private func hydrateFromWidgetCache() {
-        guard let cached = WidgetData.load(), cached.provider == AIProviderType.codex.rawValue else { return }
+        guard let cached = loadWidgetData(AIProviderType.codex.rawValue) else { return }
+        hasStatisticsSnapshot = true
         costSeries = CostSeriesModel(todayCost: cached.todayCost, daily: [])
         activitySummary = ActivitySummaryModel(
             turns: cached.conversationTurns,

@@ -76,17 +76,44 @@ struct WidgetData: Codable {
     /// Load from the shared App Group container.
     static func load() -> WidgetData? {
         guard let containerURL = sharedContainerURL else { return nil }
-        let fileURL = containerURL.appendingPathComponent(fileName)
-        guard let data = try? Data(contentsOf: fileURL) else { return nil }
-        return try? JSONDecoder().decode(WidgetData.self, from: data)
+        return try? load(from: containerURL)
+    }
+
+    static func load(provider: String) -> WidgetData? {
+        guard let containerURL = sharedContainerURL else { return nil }
+        return try? load(provider: provider, from: containerURL)
     }
 
     /// Save to the shared App Group container.
     func save() {
         guard let containerURL = Self.sharedContainerURL else { return }
-        let fileURL = containerURL.appendingPathComponent(Self.fileName)
-        if let data = try? JSONEncoder().encode(self) {
-            try? data.write(to: fileURL, options: .atomic)
+        try? save(to: containerURL)
+    }
+
+    static func load(from directory: URL) throws -> WidgetData? {
+        try load(fileName: fileName, from: directory)
+    }
+
+    static func load(provider: String, from directory: URL) throws -> WidgetData? {
+        try load(fileName: providerFileName(provider), from: directory)
+    }
+
+    func save(to directory: URL) throws {
+        let data = try JSONEncoder().encode(self)
+        try data.write(to: directory.appendingPathComponent(Self.fileName), options: .atomic)
+        if let provider {
+            try data.write(to: directory.appendingPathComponent(Self.providerFileName(provider)), options: .atomic)
         }
+    }
+
+    private static func load(fileName: String, from directory: URL) throws -> WidgetData? {
+        let fileURL = directory.appendingPathComponent(fileName)
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
+        return try JSONDecoder().decode(WidgetData.self, from: Data(contentsOf: fileURL))
+    }
+
+    private static func providerFileName(_ provider: String) -> String {
+        let slug = provider.lowercased().filter { $0.isLetter || $0.isNumber }
+        return "widget-data-\(slug).json"
     }
 }

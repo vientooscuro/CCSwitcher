@@ -1,7 +1,29 @@
 import Foundation
 import Security
+import Darwin
 
 private let log = FileLog("Keychain")
+
+enum ProcessWaiter {
+    static func waitUntilExit(_ process: Process, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        guard process.isRunning else { return true }
+
+        process.terminate()
+        let terminationDeadline = Date().addingTimeInterval(0.25)
+        while process.isRunning, Date() < terminationDeadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        if process.isRunning {
+            Darwin.kill(process.processIdentifier, SIGKILL)
+            process.waitUntilExit()
+        }
+        return false
+    }
+}
 
 /// Per-account backup: keychain token + oauthAccount from ~/.claude.json
 ///
@@ -216,18 +238,10 @@ actor KeychainService {
             return cached
         }
 
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: appBackupService,
-            kSecAttrAccount as String: appBackupAccount,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-
-        if status == errSecSuccess, let data = item as? Data,
+        if let raw = runSecurity(args: [
+            "find-generic-password", "-s", appBackupService,
+            "-a", appBackupAccount, "-w"
+        ]), let data = raw.data(using: .utf8),
            let dict = try? JSONDecoder().decode([String: AccountBackup].self, from: data) {
             log.debug("[loadBackupStore] Loaded \(dict.count) entries from Keychain")
             backupCache = dict
@@ -300,7 +314,10 @@ actor KeychainService {
 
         do {
             try process.run()
-            process.waitUntilExit()
+            guard ProcessWaiter.waitUntilExit(process, timeout: 5) else {
+                log.warning("[runSecurity] Timed out after 5s")
+                return nil
+            }
             guard process.terminationStatus == 0 else {
                 log.debug("[runSecurity] Exit \(process.terminationStatus) for: security \(args.prefix(3).joined(separator: " "))...")
                 return nil
@@ -323,7 +340,10 @@ actor KeychainService {
         process.standardError = FileHandle.nullDevice
         do {
             try process.run()
-            process.waitUntilExit()
+            guard ProcessWaiter.waitUntilExit(process, timeout: 5) else {
+                log.warning("[runSecurityStatus] Timed out after 5s")
+                return false
+            }
             let ok = process.terminationStatus == 0
             if !ok {
                 log.debug("[runSecurityStatus] Exit \(process.terminationStatus) for: security \(args.prefix(3).joined(separator: " "))...")

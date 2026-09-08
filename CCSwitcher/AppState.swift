@@ -22,6 +22,7 @@ final class AppState: ObservableObject {
     @Published var activityStats: ActivityStats = .empty
     @Published var usageSummary: UsageSummary = .empty
     @Published var recentActivity: [DailyActivity] = []
+    private(set) var hasStatisticsSnapshot = false
 
     struct UsageErrorState {
         let isExpired: Bool
@@ -51,6 +52,7 @@ final class AppState: ObservableObject {
     /// shouldn't trigger a synchronous JSONEncoder + UserDefaults write.
     private var pendingSaveTask: Task<Void, Never>?
     private var statisticsGeneration = UUID()
+    private var accountRefreshGeneration = UUID()
 
     /// Set by `ProviderHub` at init. `refresh()` and `updateAccountLabel`
     /// call this instead of writing the widget snapshot directly — only the
@@ -120,9 +122,11 @@ final class AppState: ObservableObject {
         // Run the (non-essential) keychain health diagnostic once at startup,
         // off the main thread. Used to run on every refresh — totally
         // unnecessary every 5 minutes.
-        Task.detached(priority: .background) { [weak self] in
-            await self?.diagnoseTokenHealth()
-            await self?.refreshBackupPresence()
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
+            Task.detached(priority: .background) { [weak self] in
+                await self?.diagnoseTokenHealth()
+                await self?.refreshBackupPresence()
+            }
         }
     }
 
@@ -137,7 +141,11 @@ final class AppState: ObservableObject {
             log.info("[refresh] Skipping: login in progress")
             return
         }
-        isLoading = true
+        guard let accountRefreshGeneration = beginAccountRefresh(force: force) else {
+            log.info("[refresh] Skipping overlapping automatic refresh")
+            return
+        }
+        defer { finishAccountRefresh(generation: accountRefreshGeneration) }
         errorMessage = nil
 
         if let knownStatus {
@@ -162,6 +170,7 @@ final class AppState: ObservableObject {
         // immediately because account state actually changed. The user-clicked
         // refresh button passes `force: true` for the same reason.
         await fetchAllAccountUsage(force: force || knownStatus != nil)
+        guard self.accountRefreshGeneration == accountRefreshGeneration else { return }
         lastUsageRefresh = Date()
 
         // Stats come from ~/.claude JSON caches (synchronous, cheap).
@@ -184,6 +193,7 @@ final class AppState: ObservableObject {
         guard self.statisticsGeneration == statisticsGeneration else { return }
         costSummary = cost
         activityStats = activity
+        hasStatisticsSnapshot = true
         finishStatisticsRefresh(generation: statisticsGeneration)
 
         log.info("[refresh] Usage: weekly=\(self.usageSummary.weeklyMessages) msgs, \(self.activeSessions.count) active sessions, today=$\(String(format: "%.2f", cost.todayCost)) turns=\(activity.conversationTurns)")
@@ -198,6 +208,19 @@ final class AppState: ObservableObject {
         statisticsGeneration = generation
         isStatisticsLoading = true
         return generation
+    }
+
+    func beginAccountRefresh(force: Bool) -> UUID? {
+        guard force || !isLoading else { return nil }
+        let generation = UUID()
+        accountRefreshGeneration = generation
+        isLoading = true
+        return generation
+    }
+
+    func finishAccountRefresh(generation: UUID) {
+        guard accountRefreshGeneration == generation else { return }
+        isLoading = false
     }
 
     func finishStatisticsRefresh(generation: UUID) {
@@ -243,7 +266,8 @@ final class AppState: ObservableObject {
     }
 
     private func hydrateFromWidgetCache() {
-        guard let cached = WidgetData.load() else { return }
+        guard let cached = WidgetData.load(provider: AIProviderType.claudeCode.rawValue) else { return }
+        hasStatisticsSnapshot = true
         log.info("[init] Hydrating from widget cache: today=$\(String(format: "%.2f", cached.todayCost)), turns=\(cached.conversationTurns)")
         // Only fields that map cleanly; the rest will fill in on first refresh.
         costSummary = CostSummary(todayCost: cached.todayCost, dailyCosts: [])

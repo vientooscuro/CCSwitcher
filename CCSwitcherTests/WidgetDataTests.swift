@@ -51,4 +51,26 @@ final class WidgetDataTests: XCTestCase {
         )
         XCTAssertNil(data.provider)
     }
+
+    func testProviderSnapshotsRemainIndependentWhenGenericWidgetDataChanges() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let codex = WidgetData(
+            accounts: [], todayCost: 12.34, conversationTurns: 56, activeCodingTime: "2h",
+            linesWritten: 78, modelUsage: ["gpt-6-astra": 90], lastUpdated: Date(), provider: "Codex"
+        )
+        let claude = WidgetData(
+            accounts: [], todayCost: 1.23, conversationTurns: 4, activeCodingTime: "15m",
+            linesWritten: 5, modelUsage: ["Opus": 6], lastUpdated: Date(), provider: "Claude Code"
+        )
+
+        try codex.save(to: directory)
+        try claude.save(to: directory)
+
+        XCTAssertEqual(try WidgetData.load(provider: "Codex", from: directory)?.todayCost, 12.34)
+        XCTAssertEqual(try WidgetData.load(provider: "Codex", from: directory)?.conversationTurns, 56)
+        XCTAssertEqual(try WidgetData.load(provider: "Claude Code", from: directory)?.todayCost, 1.23)
+        XCTAssertEqual(try WidgetData.load(from: directory)?.provider, "Claude Code")
+    }
 }
