@@ -52,6 +52,8 @@ final class CodexState: ObservableObject, ProviderSurface {
     private let defaults: UserDefaults
     let profiles: CodexDesktopProfiles
     private let openDesktop: (CodexDesktopProfile) async throws -> Void
+    private let loadCLIBackup: @MainActor (String) async -> String?
+    private let saveCLIBackup: @MainActor (String, String) async -> Bool
     private var loginTask: Task<Void, Never>?
     private var loginGeneration = UUID()
     private static let pendingLoginKey = "codexDesktopPendingLoginID"
@@ -61,6 +63,12 @@ final class CodexState: ObservableObject, ProviderSurface {
         defaults: UserDefaults = .standard,
         profiles: CodexDesktopProfiles? = nil,
         openDesktop: @escaping (CodexDesktopProfile) async throws -> Void = CodexDesktopProfiles.open,
+        loadCLIBackup: @escaping @MainActor (String) async -> String? = { accountID in
+            CodexAccountStore.shared.backup(forAccountId: accountID)
+        },
+        saveCLIBackup: @escaping @MainActor (String, String) async -> Bool = { contents, accountID in
+            CodexAccountStore.shared.saveBackup(contents, forAccountId: accountID)
+        },
         fetchUsage: @escaping @MainActor (CodexAuth, UUID) async throws -> CodexUsageService.Result = { auth, id in
             try await CodexUsageService.shared.fetchLive(
                 accessToken: auth.tokens.accessToken, accountId: auth.tokens.accountId, profileID: id
@@ -73,6 +81,8 @@ final class CodexState: ObservableObject, ProviderSurface {
         self.defaults = defaults
         self.profiles = profiles ?? CodexDesktopProfiles(defaults: defaults)
         self.openDesktop = openDesktop
+        self.loadCLIBackup = loadCLIBackup
+        self.saveCLIBackup = saveCLIBackup
         self.fetchUsage = fetchUsage
         self.cachedUsage = cachedUsage
         statisticsScope = defaults.string(forKey: "codexStatisticsScope").flatMap(CodexStatisticsScope.init(rawValue:)) ?? .allProfiles
@@ -446,6 +456,61 @@ final class CodexState: ObservableObject, ProviderSurface {
         }
         selectAccount(accountId)
         await refresh(force: true)
+    }
+
+    func activateCLI(accountId: UUID) async {
+        guard !isLoading, !isAuthenticating,
+              let target = accounts.first(where: { $0.id == accountId }) else { return }
+
+        errorMessage = nil
+        isLoading = true
+        defer { isLoading = false }
+
+        let targetProfile = profiles.profile(for: accountId)
+        let profileCredentials = CodexAuthWriter.read(at: targetProfile.authURL.path)
+        let targetCredentials: String?
+        if let profileCredentials, Self.credentials(profileCredentials, belongTo: target.email) {
+            targetCredentials = profileCredentials
+        } else {
+            targetCredentials = await loadCLIBackup(accountId.uuidString)
+        }
+
+        guard let targetCredentials,
+              Self.credentials(targetCredentials, belongTo: target.email) else {
+            errorMessage = "No valid Codex CLI credentials for \(target.email). Sign in to this account again."
+            return
+        }
+
+        let destination = profiles.defaultProfile.authURL.path
+        if let liveCredentials = CodexAuthWriter.read(at: destination) {
+            guard let liveAccount = accounts.first(where: {
+                Self.credentials(liveCredentials, belongTo: $0.email)
+            }) else {
+                errorMessage = "The current Codex CLI credentials do not match a saved account. They were left unchanged."
+                return
+            }
+            guard await saveCLIBackup(liveCredentials, liveAccount.id.uuidString) else {
+                errorMessage = "Could not preserve the current Codex CLI credentials."
+                return
+            }
+        }
+
+        guard CodexAuthWriter.write(targetCredentials, to: destination) else {
+            errorMessage = "Could not write Codex CLI credentials."
+            return
+        }
+
+        selectAccount(accountId)
+        refreshBackupPresence()
+        didRefresh?()
+    }
+
+    private static func credentials(_ contents: String, belongTo email: String) -> Bool {
+        guard let auth = try? CodexAuthService.decode(authJSON: Data(contents.utf8)),
+              let credentialEmail = CodexAuthService.claims(fromIDToken: auth.tokens.idToken)?.email else {
+            return false
+        }
+        return credentialEmail.caseInsensitiveCompare(email) == .orderedSame
     }
 
     func reauthenticate(id: UUID) async {

@@ -127,6 +127,48 @@ final class CodexDesktopProfilesTests: XCTestCase {
         return (first, second)
     }
 
+    func testActivatingCLIAccountPreservesCurrentCredentialsAndWritesSelectedProfile() async throws {
+        let (first, second) = try signedInAccounts()
+        let firstAuth = try String(contentsOf: profiles.defaultProfile.authURL, encoding: .utf8)
+        let secondAuth = try String(contentsOf: profiles.profile(for: second.id).authURL, encoding: .utf8)
+        var backups: [String: String] = [:]
+        let state = CodexState(
+            defaults: defaults,
+            profiles: profiles,
+            openDesktop: { _ in XCTFail("CLI activation must not open Codex Desktop") },
+            loadCLIBackup: { backups[$0] },
+            saveCLIBackup: { contents, accountID in
+                backups[accountID] = contents
+                return true
+            }
+        )
+
+        await state.activateCLI(accountId: second.id)
+
+        XCTAssertEqual(try String(contentsOf: profiles.defaultProfile.authURL, encoding: .utf8), secondAuth)
+        XCTAssertEqual(backups[first.id.uuidString], firstAuth)
+        XCTAssertEqual(state.accounts.first(where: \.isActive)?.id, second.id)
+        XCTAssertNil(state.errorMessage)
+    }
+
+    func testActivatingCLIAccountRejectsMismatchedCredentialsWithoutChangingDefault() async throws {
+        let (first, second) = try signedInAccounts()
+        try writeAuth(email: first.email, to: profiles.profile(for: second.id).authURL)
+        let original = try Data(contentsOf: profiles.defaultProfile.authURL)
+        let state = CodexState(
+            defaults: defaults,
+            profiles: profiles,
+            loadCLIBackup: { _ in nil },
+            saveCLIBackup: { _, _ in true }
+        )
+
+        await state.activateCLI(accountId: second.id)
+
+        XCTAssertEqual(try Data(contentsOf: profiles.defaultProfile.authURL), original)
+        XCTAssertEqual(state.accounts.first(where: \.isActive)?.id, first.id)
+        XCTAssertNotNil(state.errorMessage)
+    }
+
     func testRefreshFetchesEachLiveProfileWithoutSwitchingOrWritingCredentials() async throws {
         let (first, second) = try signedInAccounts()
         let originalAuth = try [first, second].map { try Data(contentsOf: profiles.profile(for: $0.id).authURL) }

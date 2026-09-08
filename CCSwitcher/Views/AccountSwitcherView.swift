@@ -158,6 +158,19 @@ struct AccountSwitcherView: View {
                 .disabled(!row.hasStoredCredentials || hub.surface.isAuthenticating || hub.surface.isLoading)
             }
 
+            if let codex = hub.surface as? CodexState {
+                Button {
+                    Task { await codex.activateCLI(accountId: row.id) }
+                } label: {
+                    Image(systemName: "terminal")
+                        .font(.caption)
+                        .foregroundStyle(theme.accent)
+                }
+                .buttonStyle(.plain)
+                .help("Use in Codex CLI")
+                .disabled(!row.hasStoredCredentials || codex.isAuthenticating || codex.isLoading)
+            }
+
             if hub.surface.capabilities.canReauthenticate {
                 Button {
                     Task { await hub.surface.reauthenticate(id: row.id) }
