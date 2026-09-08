@@ -109,4 +109,10 @@ final class AppStateRefreshPhaseTests: XCTestCase {
         state.finishAccountRefresh(generation: try! XCTUnwrap(forced))
         XCTAssertFalse(state.isLoading)
     }
+
+    func testActivityDurationRestoresMinutesFromWidgetText() {
+        XCTAssertEqual(ActivityStats.minutes(from: "48h 16m"), 2_896)
+        XCTAssertEqual(ActivityStats.minutes(from: "45m"), 45)
+        XCTAssertEqual(ActivityStats.minutes(from: "2h"), 120)
+    }
 }

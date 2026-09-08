@@ -32,4 +32,14 @@ struct ActivityStats: Sendable {
         let mins = activeCodingMinutes % 60
         return mins > 0 ? "\(hours)h \(mins)m" : "\(hours)h"
     }
+
+    static func minutes(from duration: String) -> Int {
+        duration.split(separator: " ").reduce(into: 0) { total, component in
+            if component.hasSuffix("h"), let hours = Int(component.dropLast()) {
+                total += hours * 60
+            } else if component.hasSuffix("m"), let minutes = Int(component.dropLast()) {
+                total += minutes
+            }
+        }
+    }
 }

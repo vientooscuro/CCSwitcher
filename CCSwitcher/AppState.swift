@@ -273,7 +273,7 @@ final class AppState: ObservableObject {
         costSummary = CostSummary(todayCost: cached.todayCost, dailyCosts: [])
         activityStats = ActivityStats(
             conversationTurns: cached.conversationTurns,
-            activeCodingMinutes: 0,
+            activeCodingMinutes: ActivityStats.minutes(from: cached.activeCodingTime),
             toolUsage: [:],
             linesWritten: cached.linesWritten,
             modelUsage: cached.modelUsage
