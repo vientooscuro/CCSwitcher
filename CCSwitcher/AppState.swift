@@ -13,6 +13,7 @@ final class AppState: ObservableObject {
     @Published var accountUsage: [UUID: UsageAPIResponse] = [:]
     @Published var activeSessions: [SessionInfo] = []
     @Published var isLoading = false
+    @Published private(set) var isStatisticsLoading = false
     @Published var isLoggingIn = false
     @Published var errorMessage: String?
     @Published var claudeAvailable = false
@@ -49,6 +50,7 @@ final class AppState: ObservableObject {
     /// Debounce token for `saveAccounts` — small mutations like `lastUsed`
     /// shouldn't trigger a synchronous JSONEncoder + UserDefaults write.
     private var pendingSaveTask: Task<Void, Never>?
+    private var statisticsGeneration = UUID()
 
     /// Set by `ProviderHub` at init. `refresh()` and `updateAccountLabel`
     /// call this instead of writing the widget snapshot directly — only the
@@ -167,19 +169,40 @@ final class AppState: ObservableObject {
         recentActivity = statsParser.getRecentActivity(days: 7)
         activeSessions = statsParser.getActiveSessions()
 
+        guard let statisticsGeneration = beginStatisticsRefresh(force: force) else {
+            didRefresh?()
+            return
+        }
+
         // Heavy JSONL parsing: walk the filesystem once via the shared cache,
         // then pull aggregated outputs. The cache actor runs off the main
         // thread, so awaiting these does not block the UI.
         await SessionParseCacheV2.shared.refreshFromFilesystem()
         let cost = await costParser.getCostSummary()
         let activity = await activityParser.getTodayStats()
+        await SessionParseCacheV2.shared.releaseResidentData()
+        guard self.statisticsGeneration == statisticsGeneration else { return }
         costSummary = cost
         activityStats = activity
+        finishStatisticsRefresh(generation: statisticsGeneration)
 
         log.info("[refresh] Usage: weekly=\(self.usageSummary.weeklyMessages) msgs, \(self.activeSessions.count) active sessions, today=$\(String(format: "%.2f", cost.todayCost)) turns=\(activity.conversationTurns)")
 
         didRefresh?()
+    }
+
+    func beginStatisticsRefresh(force: Bool) -> UUID? {
         isLoading = false
+        guard force, !isStatisticsLoading else { return nil }
+        let generation = UUID()
+        statisticsGeneration = generation
+        isStatisticsLoading = true
+        return generation
+    }
+
+    func finishStatisticsRefresh(generation: UUID) {
+        guard statisticsGeneration == generation else { return }
+        isStatisticsLoading = false
     }
 
     func startAutoRefresh(interval: TimeInterval = 300) {

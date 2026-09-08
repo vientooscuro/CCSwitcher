@@ -94,6 +94,31 @@ final class CodexAccountingRegressionTests: XCTestCase {
         XCTAssertEqual(series.totalCost, 0.55, accuracy: 1e-9)
     }
 
+    func testReleasedCodexCacheReloadsPersistedEntriesWithoutChangingTotals() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        try rollout(id: "resident", values: [100, 300])
+            .write(to: home.appendingPathComponent("rollout-resident.jsonl"), atomically: true, encoding: .utf8)
+        let cache = CodexSessionCache(sessionRoots: [home.path], cacheURL: home.appendingPathComponent("cache.json"))
+
+        await cache.refreshFromFilesystem()
+        let before = await cache.costSeries()
+        let residentBeforeRelease = await cache.residentFileCount()
+        XCTAssertEqual(residentBeforeRelease, 1)
+
+        await cache.releaseResidentData()
+        let residentAfterRelease = await cache.residentFileCount()
+        XCTAssertEqual(residentAfterRelease, 0)
+
+        await cache.refreshFromFilesystem()
+        let after = await cache.costSeries()
+        let residentAfterReload = await cache.residentFileCount()
+        XCTAssertEqual(residentAfterReload, 1)
+        XCTAssertEqual(before.daily.first?.totalTokens, 300)
+        XCTAssertEqual(after.daily.first?.totalTokens, before.daily.first?.totalTokens)
+    }
+
     func testRepeatedFirstSnapshotOfPartialReplayIsNotAnotherRequest() throws {
         let first = rollout(id: "one", values: [100], times: [0])
         let repeated = rollout(id: "one", values: [100], times: [2])

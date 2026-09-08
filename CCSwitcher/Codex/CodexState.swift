@@ -87,6 +87,7 @@ final class CodexState: ObservableObject, ProviderSurface {
         self.cachedUsage = cachedUsage
         statisticsScope = defaults.string(forKey: "codexStatisticsScope").flatMap(CodexStatisticsScope.init(rawValue:)) ?? .allProfiles
         accounts = CodexAccountRegistry.load(from: defaults)
+        hydrateFromWidgetCache()
     }
 
     var selectedProfile: CodexDesktopProfile {
@@ -221,10 +222,12 @@ final class CodexState: ObservableObject, ProviderSurface {
         for account in accounts {
             await refreshLimits(for: account, force: force)
         }
-        await refreshCostAndActivity(notify: false)
+        isLoading = false
+        if force {
+            await refreshCostAndActivity(notify: false)
+        }
 
         lastRefresh = Date()
-        isLoading = false
         didRefresh?()
     }
 
@@ -285,15 +288,13 @@ final class CodexState: ObservableObject, ProviderSurface {
         statisticsGeneration = UUID()
         costSeries = .empty
         activitySummary = .empty
-        isStatisticsLoading = true
+        isStatisticsLoading = false
     }
 
     func refreshCostAndActivity(notify: Bool = true) async {
-        let generation = UUID()
-        statisticsGeneration = generation
-        isStatisticsLoading = true
+        guard let generation = beginStatisticsRefreshIfIdle() else { return }
         defer {
-            if statisticsGeneration == generation { isStatisticsLoading = false }
+            finishStatisticsRefresh(generation: generation)
         }
         let profile = selectedProfile
         let scope = statisticsScope
@@ -319,11 +320,39 @@ final class CodexState: ObservableObject, ProviderSurface {
         await sessionCache.refreshFromFilesystem()
         let cost = await sessionCache.costSeries()
         let activity = await sessionCache.activityToday()
+        await sessionCache.releaseResidentData()
         guard statisticsGeneration == generation, statisticsScope == scope, selectedProfile == profile else { return }
         costSeries = cost
         activitySummary = activity
         if notify { didRefresh?() }
         log.info("[refresh] today=$\(String(format: "%.2f", costSeries.todayCost)) turns=\(activitySummary.turns)")
+    }
+
+    func beginStatisticsRefreshIfIdle() -> UUID? {
+        guard !isStatisticsLoading else { return nil }
+        let generation = UUID()
+        statisticsGeneration = generation
+        isStatisticsLoading = true
+        return generation
+    }
+
+    func finishStatisticsRefresh(generation: UUID) {
+        guard statisticsGeneration == generation else { return }
+        isStatisticsLoading = false
+    }
+
+    private func hydrateFromWidgetCache() {
+        guard let cached = WidgetData.load(), cached.provider == AIProviderType.codex.rawValue else { return }
+        costSeries = CostSeriesModel(todayCost: cached.todayCost, daily: [])
+        activitySummary = ActivitySummaryModel(
+            turns: cached.conversationTurns,
+            activeTimeText: cached.activeCodingTime,
+            linesWritten: cached.linesWritten,
+            perModel: cached.modelUsage.map { name, count in
+                ModelUsageEntry(displayName: name, count: count, tint: CodexDisplayMapper.tint(forModel: name))
+            }.sorted { $0.count > $1.count }
+        )
+        lastRefresh = cached.lastUpdated
     }
 
     private func syncAccountFields(id: UUID, claims: CodexIDTokenClaims?, plan: String?) {

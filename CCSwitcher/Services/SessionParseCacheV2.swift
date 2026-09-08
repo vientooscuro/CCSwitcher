@@ -97,14 +97,17 @@ actor SessionParseCacheV2 {
     private var pricingMeta: PricingMeta = .init(source: "unknown", fetchedAt: nil)
     private var loaded = false
 
-    private init() {
-        self.claudeProjectsDir = NSHomeDirectory() + "/.claude/projects"
-
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support")
-        let dir = appSupport.appendingPathComponent("CCSwitcher", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        self.cacheURL = dir.appendingPathComponent("session-parse-cache-v2.json")
+    init(projectsDir: String = NSHomeDirectory() + "/.claude/projects", cacheURL: URL? = nil) {
+        claudeProjectsDir = projectsDir
+        if let cacheURL {
+            self.cacheURL = cacheURL
+        } else {
+            let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+                ?? URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support")
+            let dir = appSupport.appendingPathComponent("CCSwitcher", isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            self.cacheURL = dir.appendingPathComponent("session-parse-cache-v2.json")
+        }
     }
 
     // MARK: Public API
@@ -311,6 +314,13 @@ actor SessionParseCacheV2 {
     /// Read-only view of the pricing snapshot in use. Surfaced for
     /// debugging UIs and the Cost tab's "How We Calculate" line.
     func pricingMetaSnapshot() -> PricingMeta { pricingMeta }
+
+    func releaseResidentData() {
+        files = [:]
+        loaded = false
+    }
+
+    func residentFileCount() -> Int { files.count }
 
     // MARK: - Scan & parse
 

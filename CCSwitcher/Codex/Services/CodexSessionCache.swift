@@ -148,6 +148,13 @@ actor CodexSessionCache {
         save()
     }
 
+    func releaseResidentData() {
+        files = [:]
+        loaded = false
+    }
+
+    func residentFileCount() -> Int { files.count }
+
     /// Cost per day, priced with the current LiteLLM table. Prices are resolved
     /// in a single hop so a concurrent pricing reload cannot mix old and new
     /// rates into one answer.
