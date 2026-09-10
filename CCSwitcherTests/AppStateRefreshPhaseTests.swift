@@ -17,15 +17,16 @@ final class AppStateRefreshPhaseTests: XCTestCase {
         XCTAssertFalse(state.isStatisticsLoading)
     }
 
-    func testAutomaticRefreshSkipsHeavyStatisticsPhase() {
+    func testAutomaticRefreshBuildsMissingStatisticsSnapshot() {
         let state = AppState()
         state.isLoading = true
 
         let generation = state.beginStatisticsRefresh(force: false)
 
-        XCTAssertNil(generation)
+        XCTAssertNotNil(generation)
         XCTAssertFalse(state.isLoading)
-        XCTAssertFalse(state.isStatisticsLoading)
+        XCTAssertTrue(state.isStatisticsLoading)
+        state.finishStatisticsRefresh(generation: try! XCTUnwrap(generation))
     }
 
     func testCodexStatisticsPhaseRejectsOverlappingRefreshes() {
@@ -59,7 +60,7 @@ final class AppStateRefreshPhaseTests: XCTestCase {
         XCTAssertEqual(state.cost.todayCost, 7.5)
         XCTAssertEqual(state.activity.turns, 12)
         XCTAssertEqual(state.activity.linesWritten, 34)
-        XCTAssertFalse(state.needsInitialStatisticsRefresh)
+        XCTAssertTrue(state.needsInitialStatisticsRefresh)
     }
 
     func testCodexRequestsOneInitialStatisticsRefreshWithoutSnapshot() {

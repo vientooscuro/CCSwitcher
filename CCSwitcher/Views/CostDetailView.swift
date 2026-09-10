@@ -35,7 +35,14 @@ struct CostDetailView: View {
                 }
                 pricingInfoSection
             }
-            .padding(.vertical, 12)
+        .padding(.vertical, 12)
+        .task(id: hub.activeProvider) {
+            // Widget restoration has only a headline value. If the automatic
+            // history rebuild has not finished yet, make the period cards and
+            // daily history truthful on first display.
+            guard hub.surface.cost.daily.isEmpty else { return }
+            await hub.refreshActive(force: true)
+        }
         }
     }
 
@@ -144,7 +151,7 @@ struct CostDetailView: View {
                     .font(.caption.weight(.medium))
                     .foregroundStyle(theme.textSecondary)
                 Spacer()
-                Text("Total: \(formatCost(hub.surface.cost.totalCost))")
+                Text("All history: \(formatCost(hub.surface.cost.totalCost))")
                     .font(.caption2.weight(.medium).monospacedDigit())
                     .foregroundStyle(theme.textSecondary)
             }

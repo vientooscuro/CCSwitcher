@@ -349,7 +349,6 @@ final class CodexState: ObservableObject, ProviderSurface {
 
     private func hydrateFromWidgetCache() {
         guard let cached = loadWidgetData(AIProviderType.codex.rawValue) else { return }
-        hasStatisticsSnapshot = true
         costSeries = CostSeriesModel(todayCost: cached.todayCost, daily: [])
         activitySummary = ActivitySummaryModel(
             turns: cached.conversationTurns,

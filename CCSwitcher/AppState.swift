@@ -203,7 +203,10 @@ final class AppState: ObservableObject {
 
     func beginStatisticsRefresh(force: Bool) -> UUID? {
         isLoading = false
-        guard force, !isStatisticsLoading else { return nil }
+        // A widget snapshot only contains today's headline, never the daily
+        // series. Rebuild the series once after launch so Costs cannot present
+        // a cached total as though it were complete history.
+        guard (force || !hasStatisticsSnapshot), !isStatisticsLoading else { return nil }
         let generation = UUID()
         statisticsGeneration = generation
         isStatisticsLoading = true
@@ -267,7 +270,6 @@ final class AppState: ObservableObject {
 
     private func hydrateFromWidgetCache() {
         guard let cached = WidgetData.load(provider: AIProviderType.claudeCode.rawValue) else { return }
-        hasStatisticsSnapshot = true
         log.info("[init] Hydrating from widget cache: today=$\(String(format: "%.2f", cached.todayCost)), turns=\(cached.conversationTurns)")
         // Only fields that map cleanly; the rest will fill in on first refresh.
         costSummary = CostSummary(todayCost: cached.todayCost, dailyCosts: [])
