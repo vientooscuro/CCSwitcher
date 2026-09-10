@@ -1,13 +1,9 @@
-### More accurate Codex cost estimates
+### Complete cost histories
 
-- Add GPT-6 Astra pricing while preserving its full token usage.
-- Apply long-context, Priority and Flex rates per request before daily aggregation.
-- Keep models without verified prices visibly unpriced instead of substituting another model's rate.
-- Preserve service-tier information across replayed sessions and mark estimates incomplete when that information is missing.
-- Improve replay deduplication so input order does not change the result.
+- Rebuild Claude and Codex daily cost histories after restoring the compact widget snapshot.
+- Refresh the history automatically when opening Costs, so the period cards and daily breakdown cannot show a headline-only cached value.
+- Label the archive-wide cost explicitly as “All history”, separate from the 7-day and 30-day windows.
 
-Costs remain estimates based on local usage and current model prices, not subscription invoices. Existing history is refreshed on first launch; large histories can take several minutes.
+Costs remain estimates based on local usage and current model prices, not subscription invoices.
 
-Validation: 191 tests passed, one opt-in full-history test skipped.
-
-**Full Changelog**: https://github.com/vientooscuro/CCSwitcher/compare/v1.13.1...v1.13.2
+**Full Changelog**: https://github.com/vientooscuro/CCSwitcher/compare/v1.13.2...v1.13.3
