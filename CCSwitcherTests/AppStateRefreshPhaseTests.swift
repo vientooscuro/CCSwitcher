@@ -87,6 +87,20 @@ final class AppStateRefreshPhaseTests: XCTestCase {
         XCTAssertFalse(process.isRunning)
     }
 
+    func testProcessWaiterDrainsCapturedOutputBeforeProcessExit() throws {
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", "dd if=/dev/zero bs=1024 count=128 2>/dev/null"]
+        process.standardOutput = pipe
+        try process.run()
+
+        let result = ProcessWaiter.waitUntilExit(process, capturing: pipe, timeout: 1)
+
+        XCTAssertTrue(result.completed)
+        XCTAssertEqual(result.output.count, 128 * 1024)
+    }
+
     func testPeriodicClaudeRefreshDoesNotOverlapInFlightRefresh() {
         let state = AppState()
         let first = state.beginAccountRefresh(force: false)

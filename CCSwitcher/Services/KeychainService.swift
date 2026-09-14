@@ -1,10 +1,16 @@
 import Foundation
 import Security
 import Darwin
+import os
 
 private let log = FileLog("Keychain")
 
 enum ProcessWaiter {
+    struct CapturedResult {
+        let completed: Bool
+        let output: Data
+    }
+
     static func waitUntilExit(_ process: Process, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while process.isRunning, Date() < deadline {
@@ -22,6 +28,36 @@ enum ProcessWaiter {
             process.waitUntilExit()
         }
         return false
+    }
+
+    static func waitUntilExit(_ process: Process, capturing pipe: Pipe, timeout: TimeInterval) -> CapturedResult {
+        let reader = ProcessOutputReader(pipe: pipe)
+        reader.start()
+        let completed = waitUntilExit(process, timeout: timeout)
+        return CapturedResult(completed: completed, output: reader.waitForOutput())
+    }
+}
+
+private final class ProcessOutputReader: @unchecked Sendable {
+    private let handle: FileHandle
+    private let output = OSAllocatedUnfairLock(initialState: Data())
+    private let finished = DispatchSemaphore(value: 0)
+
+    init(pipe: Pipe) {
+        self.handle = pipe.fileHandleForReading
+    }
+
+    func start() {
+        DispatchQueue.global(qos: .userInteractive).async { [self] in
+            let data = handle.readDataToEndOfFile()
+            output.withLock { $0 = data }
+            finished.signal()
+        }
+    }
+
+    func waitForOutput() -> Data {
+        finished.wait()
+        return output.withLock { $0 }
     }
 }
 
@@ -314,7 +350,8 @@ actor KeychainService {
 
         do {
             try process.run()
-            guard ProcessWaiter.waitUntilExit(process, timeout: 5) else {
+            let result = ProcessWaiter.waitUntilExit(process, capturing: pipe, timeout: 5)
+            guard result.completed else {
                 log.warning("[runSecurity] Timed out after 5s")
                 return nil
             }
@@ -322,8 +359,7 @@ actor KeychainService {
                 log.debug("[runSecurity] Exit \(process.terminationStatus) for: security \(args.prefix(3).joined(separator: " "))...")
                 return nil
             }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8)?
+            let output = String(data: result.output, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             return output?.isEmpty == true ? nil : output
         } catch {
