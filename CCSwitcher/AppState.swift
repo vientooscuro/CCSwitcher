@@ -141,7 +141,10 @@ final class AppState: ObservableObject {
             log.info("[refresh] Skipping: login in progress")
             return
         }
-        guard let accountRefreshGeneration = beginAccountRefresh(force: force) else {
+        guard let accountRefreshGeneration = beginAccountRefresh(
+            force: force,
+            hasKnownStatus: knownStatus != nil
+        ) else {
             log.info("[refresh] Skipping overlapping automatic refresh")
             return
         }
@@ -213,8 +216,8 @@ final class AppState: ObservableObject {
         return generation
     }
 
-    func beginAccountRefresh(force: Bool) -> UUID? {
-        guard force || !isLoading else { return nil }
+    func beginAccountRefresh(force: Bool, hasKnownStatus: Bool = false) -> UUID? {
+        guard force || hasKnownStatus || !isLoading else { return nil }
         let generation = UUID()
         accountRefreshGeneration = generation
         isLoading = true

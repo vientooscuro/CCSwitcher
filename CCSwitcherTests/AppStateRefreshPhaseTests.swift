@@ -111,6 +111,17 @@ final class AppStateRefreshPhaseTests: XCTestCase {
         XCTAssertFalse(state.isLoading)
     }
 
+    func testVerifiedAccountSwitchRefreshSupersedesSwitchLoadingState() {
+        let state = AppState()
+        state.isLoading = true
+
+        let generation = state.beginAccountRefresh(force: false, hasKnownStatus: true)
+
+        XCTAssertNotNil(generation)
+        state.finishAccountRefresh(generation: try! XCTUnwrap(generation))
+        XCTAssertFalse(state.isLoading)
+    }
+
     func testActivityDurationRestoresMinutesFromWidgetText() {
         XCTAssertEqual(ActivityStats.minutes(from: "48h 16m"), 2_896)
         XCTAssertEqual(ActivityStats.minutes(from: "45m"), 45)
