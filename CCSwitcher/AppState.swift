@@ -721,11 +721,12 @@ final class AppState: ObservableObject {
                             // refresh-token reuse detection revokes the entire
                             // token family — a persistent invalid_grant that
                             // only a manual `claude` re-auth clears (the 1-2 day
-                            // "refresh failed" loop). Delegate to the CLI so
+                            // "refresh failed" loop). Use the CLI's empty print
+                            // path to rotate credentials without inference so
                             // there is exactly one writer of the live token.
                             log.warning("[fetchUsage] Token expired for \(r.email), delegating refresh to CLI")
                             do {
-                                _ = try await claudeService.getAuthStatus()
+                                try await claudeService.refreshActiveOAuthToken()
                                 if let refreshedJSON = await keychain.readClaudeToken(),
                                    let refreshedToken = ClaudeService.extractAccessToken(from: refreshedJSON),
                                    let usage = try? await claudeService.getUsageLimits(accessToken: refreshedToken) {

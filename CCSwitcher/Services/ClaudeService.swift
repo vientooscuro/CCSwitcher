@@ -16,6 +16,7 @@ struct DetectedClaudePath: Hashable, Identifiable {
 /// Interacts with the Claude CLI to get auth status and manage accounts.
 final class ClaudeService: @unchecked Sendable {
     static let shared = ClaudeService()
+    static let activeTokenRefreshArguments = ["-p", ""]
 
     private struct PathState {
         var claudePath: String
@@ -247,6 +248,16 @@ final class ClaudeService: @unchecked Sendable {
         let status = try JSONDecoder().decode(AuthStatus.self, from: data)
         log.info("[getAuthStatus] loggedIn=\(status.loggedIn), provider=\(status.apiProvider ?? "nil"), sub=\(status.subscriptionType ?? "nil")")
         return status
+    }
+
+    func refreshActiveOAuthToken() async throws {
+        log.info("[refreshActiveOAuthToken] Asking Claude CLI to rotate the live token...")
+        _ = try await runClaude(
+            args: Self.activeTokenRefreshArguments,
+            timeout: 15,
+            acceptedExitCodes: [0, 1]
+        )
+        log.info("[refreshActiveOAuthToken] CLI refresh trigger completed")
     }
 
     func isClaudeAvailable() async -> Bool {
@@ -718,7 +729,7 @@ final class ClaudeService: @unchecked Sendable {
     /// Run `claude auth login` which opens browser for OAuth.
     func login() async throws {
         log.info("[login] Starting `claude auth login`... (will open browser)")
-        _ = try await runClaude(args: ["auth", "login"])
+        _ = try await runClaude(args: ["auth", "login"], timeout: 600)
         log.info("[login] `claude auth login` process exited")
 
         try await Task.sleep(for: .seconds(1))
@@ -847,7 +858,11 @@ final class ClaudeService: @unchecked Sendable {
 
     // MARK: - CLI Runner
 
-    private func runClaude(args: [String]) async throws -> String {
+    private func runClaude(
+        args: [String],
+        timeout: TimeInterval = 60,
+        acceptedExitCodes: Set<Int32> = [0]
+    ) async throws -> String {
         let claudePath = self.claudePath
         let env = Self.buildEnvironment(claudePath: claudePath)
         log.debug("[runClaude] Running: \(claudePath) \(args.joined(separator: " "))")
@@ -864,13 +879,17 @@ final class ClaudeService: @unchecked Sendable {
 
                 do {
                     try process.run()
-                    process.waitUntilExit()
+                    let result = ProcessWaiter.waitUntilExit(process, capturing: pipe, timeout: timeout)
+                    let output = String(data: result.output, encoding: .utf8) ?? ""
 
-                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                    let output = String(data: data, encoding: .utf8) ?? ""
+                    guard result.completed else {
+                        log.error("[runClaude] Timed out after \(Int(timeout))s")
+                        continuation.resume(throwing: ClaudeServiceError.cliError("timed out after \(Int(timeout))s"))
+                        return
+                    }
 
-                    if process.terminationStatus == 0 {
-                        log.debug("[runClaude] Success (exit 0), output length: \(output.count)")
+                    if acceptedExitCodes.contains(process.terminationStatus) {
+                        log.debug("[runClaude] Completed (exit \(process.terminationStatus)), output length: \(output.count)")
                         continuation.resume(returning: output)
                     } else {
                         log.error("[runClaude] Failed (exit \(process.terminationStatus))")

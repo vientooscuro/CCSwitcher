@@ -101,6 +101,10 @@ final class AppStateRefreshPhaseTests: XCTestCase {
         XCTAssertEqual(result.output.count, 128 * 1024)
     }
 
+    func testActiveTokenRefreshUsesNonInteractiveEmptyPrintTrigger() {
+        XCTAssertEqual(ClaudeService.activeTokenRefreshArguments, ["-p", ""])
+    }
+
     func testPeriodicClaudeRefreshDoesNotOverlapInFlightRefresh() {
         let state = AppState()
         let first = state.beginAccountRefresh(force: false)
