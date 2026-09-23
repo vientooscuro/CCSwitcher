@@ -67,6 +67,12 @@ final class ClaudeDisplayMapperTests: XCTestCase {
         XCTAssertEqual(scoped[0].tint, Color.purple)
     }
 
+    func testVersionedScopeNameKeepsFamilyTint() {
+        XCTAssertEqual(ClaudeDisplayMapper.tint(forModel: "Opus 5.5"), Color.brand)
+        XCTAssertEqual(ClaudeDisplayMapper.tint(forModel: "Fable 5.1"), Color.purple)
+        XCTAssertEqual(ClaudeDisplayMapper.tint(forModel: "Unknown"), Color.gray)
+    }
+
     func testExtraUsageBecomesDisabledCreditPool() throws {
         let usage = try decodeUsage(fullUsageJSON)
         let credits = ClaudeDisplayMapper.credits(from: usage)

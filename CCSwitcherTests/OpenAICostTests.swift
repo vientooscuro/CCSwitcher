@@ -116,6 +116,19 @@ final class OpenAICostTests: XCTestCase {
         XCTAssertEqual(pricing?.outputPerToken, 50e-06)
     }
 
+    func testBundledTableResolvesGPT6SolAndLunaExactly() async {
+        let service = PricingService.shared
+        await service.ensureLoaded()
+        let sol = await service.pricing(for: "gpt-6-sol")
+        XCTAssertEqual(sol?.inputPerToken, 2e-06)
+        XCTAssertEqual(sol?.outputPerToken, 10e-06)
+        XCTAssertEqual(sol?.cacheReadPerToken, 0.2e-06)
+        let luna = await service.pricing(for: "gpt-6-luna")
+        XCTAssertEqual(luna?.inputPerToken, 0.1e-06)
+        XCTAssertEqual(luna?.outputPerToken, 0.5e-06)
+        XCTAssertEqual(luna?.cacheReadPerToken, 0.01e-06)
+    }
+
     func testSparkDoesNotFuzzyResolveToCodex() async {
         let pricing = await PricingService.shared.pricing(for: "gpt-5.3-codex-spark")
         XCTAssertNil(pricing)
@@ -127,6 +140,16 @@ final class OpenAICostTests: XCTestCase {
         let pricing = await service.pricing(for: "claude-opus-4-8")
         XCTAssertNotNil(pricing)
         XCTAssertGreaterThan(pricing?.outputPerToken ?? 0, 0)
+    }
+
+    func testBundledTableResolvesOpus55Exactly() async {
+        let service = PricingService.shared
+        await service.ensureLoaded()
+        let pricing = await service.pricing(for: "claude-opus-5-5")
+        XCTAssertEqual(pricing?.inputPerToken, 4e-06)
+        XCTAssertEqual(pricing?.outputPerToken, 20e-06)
+        XCTAssertEqual(pricing?.cacheCreatePerToken, 5e-06)
+        XCTAssertEqual(pricing?.cacheReadPerToken, 0.2e-06)
     }
 
     func testOpenAIRouterPrefixResolves() async {

@@ -9,12 +9,14 @@ struct ModelPricing {
     let cacheWrite: Double
     let cacheRead: Double
 
-    // Official pricing from platform.claude.com/docs/en/about-claude/pricing (synced 2026-05).
+    // Official pricing from platform.claude.com/docs/en/about-claude/pricing (synced 2026-09).
     // Cache write column = 5-minute tier (1.25x base input). Claude Code's JSONL records
     // a single `cache_creation_input_tokens` counter that does not distinguish 5m vs 1h,
     // so we apply the 5m rate (the common case for prompt caching).
     static let pricing: [String: ModelPricing] = [
         // Opus
+        "claude-opus-5-5": ModelPricing(input: 4.0, output: 20.0, cacheWrite: 5.0, cacheRead: 0.20),
+        "claude-opus-5": ModelPricing(input: 5.0, output: 25.0, cacheWrite: 6.25, cacheRead: 0.50),
         "claude-opus-4-8": ModelPricing(input: 5.0, output: 25.0, cacheWrite: 6.25, cacheRead: 0.50),
         "claude-opus-4-7": ModelPricing(input: 5.0, output: 25.0, cacheWrite: 6.25, cacheRead: 0.50),
         "claude-opus-4-6": ModelPricing(input: 5.0, output: 25.0, cacheWrite: 6.25, cacheRead: 0.50),
@@ -29,6 +31,7 @@ struct ModelPricing {
         "claude-sonnet-4": ModelPricing(input: 3.0, output: 15.0, cacheWrite: 3.75, cacheRead: 0.30),
         "claude-sonnet-3-7": ModelPricing(input: 3.0, output: 15.0, cacheWrite: 3.75, cacheRead: 0.30),
         // Fable — fast tier
+        "claude-fable-5-1": ModelPricing(input: 10.0, output: 50.0, cacheWrite: 12.5, cacheRead: 0.25),
         "claude-fable-5": ModelPricing(input: 10.0, output: 50.0, cacheWrite: 12.5, cacheRead: 1.0),
         // Haiku
         "claude-haiku-4-5": ModelPricing(input: 1.0, output: 5.0, cacheWrite: 1.25, cacheRead: 0.10),

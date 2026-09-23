@@ -9,8 +9,10 @@ enum ClaudeDisplayMapper {
     /// including zeros, because a disappearing column reads as a bug.
     static let modelOrder = ["Fable", "Opus", "Sonnet", "Haiku"]
 
+    /// Keys off the family word so versioned scope names ("Opus 5.5") keep
+    /// their family colour instead of falling through to grey.
     static func tint(forModel name: String) -> Color {
-        switch name {
+        switch name.split(separator: " ").first.map(String.init) ?? name {
         case "Fable": return .purple
         case "Opus": return .brand
         case "Sonnet": return .blue

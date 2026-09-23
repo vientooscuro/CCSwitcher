@@ -32,7 +32,7 @@ SOURCE_HASH=$(curl -fsSL "https://api.github.com/repos/BerriAI/litellm/commits?p
 FETCHED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 python3 - "$TMP" "$DEST" "$SOURCE_HASH" "$FETCHED_AT" <<'PY'
-import json, sys
+import json, re, sys
 src, dest, source_hash, fetched_at = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
 with open(src) as f:
@@ -45,10 +45,10 @@ def is_claude(name: str) -> bool:
 
 def is_openai_codex(name: str) -> bool:
     # Models Codex can actually run. Chat-only and embedding rows are excluded
-    # to keep the bundled snapshot small; anything Codex selects is a gpt-5.x,
+    # to keep the bundled snapshot small; anything Codex selects is a gpt-5+,
     # codex-*, or o-series id.
     bare = name.split('/')[-1]
-    return (bare.startswith('gpt-5')
+    return (re.match(r'gpt-([5-9]|\d{2,})', bare) is not None
             or bare.startswith('codex-')
             or bare.startswith('o3')
             or bare.startswith('o4'))

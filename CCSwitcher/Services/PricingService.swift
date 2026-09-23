@@ -215,6 +215,9 @@ actor PricingService {
     private var loadedFreshMtime: Date?
     /// Wall-clock of the last network revalidation attempt, for throttling.
     private var lastNetworkCheck: Date?
+    /// Kept under every fresh table: a download that predates this build must
+    /// not hide models the bundle already prices (they would bill at $0).
+    private lazy var bundled: LoadedBundle? = loadBundled()
 
     private static let freshURL: URL = {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -258,7 +261,7 @@ actor PricingService {
 
         // Try fresh first.
         if let fresh = loadFresh() {
-            pricing = fresh.models
+            pricing = withBundledFallback(fresh.models)
             source = .fresh(fetchedAt: fresh.fetchedAt)
             loadedFreshMtime = fresh.fetchedAt
             log.info("loaded \(pricing.count) models from fresh (\(fresh.fetchedAt))")
@@ -266,7 +269,7 @@ actor PricingService {
         }
 
         // Fall back to bundled snapshot.
-        if let bundled = loadBundled() {
+        if let bundled {
             pricing = bundled.models
             source = .bundle(commit: bundled.commit)
             log.info("loaded \(pricing.count) models from bundle (commit \(bundled.commit))")
@@ -302,7 +305,7 @@ actor PricingService {
 
         // loadFresh() enforces the validity window; a stale file won't load.
         guard let fresh = loadFresh() else { return }
-        pricing = fresh.models
+        pricing = withBundledFallback(fresh.models)
         source = .fresh(fetchedAt: fresh.fetchedAt)
         loadedFreshMtime = fresh.fetchedAt
         log.info("reloadIfFreshChanged: picked up newer fresh snapshot (\(fresh.fetchedAt)), \(pricing.count) models")
@@ -436,6 +439,11 @@ actor PricingService {
         try? data.write(to: Self.metaURL, options: .atomic)
     }
 
+    private func withBundledFallback(_ models: [String: LiteLLMModelPricing]) -> [String: LiteLLMModelPricing] {
+        guard let bundled else { return models }
+        return models.merging(bundled.models) { fresh, _ in fresh }
+    }
+
     private func loadBundled() -> LoadedBundle? {
         guard let url = Bundle.main.url(forResource: "litellm-pricing", withExtension: "json"),
               let data = try? Data(contentsOf: url),
@@ -470,7 +478,7 @@ actor PricingService {
     }
 
     /// Decode a raw LiteLLM payload into the rows CCSwitcher prices: Claude for
-    /// the Claude Code provider, gpt-5.x / codex / o-series for Codex. Returns
+    /// the Claude Code provider, gpt-* / codex / o-series for Codex. Returns
     /// nil when the bytes are not the expected object-of-entries schema, or when
     /// either family is too sparse to be a real pricing table.
     private static func providerModels(from data: Data) -> [String: LiteLLMModelPricing]? {
