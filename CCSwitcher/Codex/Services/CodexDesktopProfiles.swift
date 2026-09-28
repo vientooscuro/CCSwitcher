@@ -20,6 +20,7 @@ enum CodexWindowVisibility {
 
 struct CodexDesktopProfile: Equatable, Sendable {
     let home: URL
+    let launchHome: URL
     let userData: URL
     let isDefault: Bool
 
@@ -29,7 +30,7 @@ struct CodexDesktopProfile: Equatable, Sendable {
     func environment(inheriting source: [String: String]) -> [String: String] {
         let allowed = Set(["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "__CF_USER_TEXT_ENCODING"])
         var environment = source.filter { allowed.contains($0.key) }
-        environment["CODEX_HOME"] = home.path
+        environment["CODEX_HOME"] = launchHome.path
         environment["CODEX_ELECTRON_USER_DATA_PATH"] = userData.path
         return environment
     }
@@ -53,6 +54,7 @@ final class CodexDesktopProfiles {
     var defaultProfile: CodexDesktopProfile {
         CodexDesktopProfile(
             home: userHome.appendingPathComponent(".codex", isDirectory: true),
+            launchHome: userHome.appendingPathComponent(".codex", isDirectory: true),
             userData: userHome.appendingPathComponent("Library/Application Support/Codex", isDirectory: true),
             isDefault: true
         )
@@ -80,6 +82,8 @@ final class CodexDesktopProfiles {
         let root = userHome.appendingPathComponent("Library/Application Support/CCSwitcher/CodexProfiles/\(id.uuidString)")
         return CodexDesktopProfile(
             home: root.appendingPathComponent("home", isDirectory: true),
+            // Keep the IPC socket below macOS's 104-byte Unix socket path limit.
+            launchHome: userHome.appendingPathComponent("Library/CCS/\(id.uuidString)", isDirectory: true),
             userData: root.appendingPathComponent("desktop", isDirectory: true),
             isDefault: false
         )
@@ -94,6 +98,19 @@ final class CodexDesktopProfiles {
             }
             try manager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        }
+        let shortcutDirectory = profile.launchHome.deletingLastPathComponent()
+        if (try? shortcutDirectory.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true {
+            throw CocoaError(.fileWriteInvalidFileName)
+        }
+        try manager.createDirectory(at: shortcutDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: shortcutDirectory.path)
+        if manager.fileExists(atPath: profile.launchHome.path) {
+            guard (try? manager.destinationOfSymbolicLink(atPath: profile.launchHome.path)) == profile.home.path else {
+                throw CocoaError(.fileWriteInvalidFileName)
+            }
+        } else {
+            try manager.createSymbolicLink(at: profile.launchHome, withDestinationURL: profile.home)
         }
         let config = profile.home.appendingPathComponent("config.toml")
         if !manager.fileExists(atPath: config.path) {

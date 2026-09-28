@@ -36,6 +36,7 @@ final class CodexDesktopProfilesTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: isolated.authURL.path))
         XCTAssertNotEqual(primary.home, isolated.home)
         XCTAssertNotEqual(primary.userData, isolated.userData)
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: isolated.launchHome.path), isolated.home.path)
         XCTAssertEqual(profiles.profile(for: second), isolated)
         XCTAssertTrue(try String(contentsOf: isolated.home.appendingPathComponent("config.toml"), encoding: .utf8)
             .contains("cli_auth_credentials_store = \"file\""))
@@ -59,7 +60,8 @@ final class CodexDesktopProfilesTests: XCTestCase {
             "CODEX_HOME": "/wrong", "CODEX_THREAD_ID": "parent",
             "OPENAI_API_KEY": "test-only", "CODEX_ELECTRON_USER_DATA_PATH": "/wrong"
         ])
-        XCTAssertEqual(environment["CODEX_HOME"], profile.home.path)
+        XCTAssertEqual(environment["CODEX_HOME"], profile.launchHome.path)
+        XCTAssertNotEqual(profile.launchHome.path, profile.home.path)
         XCTAssertEqual(environment["CODEX_ELECTRON_USER_DATA_PATH"], profile.userData.path)
         XCTAssertNil(environment["CODEX_THREAD_ID"])
         XCTAssertNil(environment["OPENAI_API_KEY"])
@@ -83,6 +85,14 @@ final class CodexDesktopProfilesTests: XCTestCase {
         try FileManager.default.createDirectory(at: profile.home.deletingLastPathComponent(), withIntermediateDirectories: true)
         try FileManager.default.createSymbolicLink(at: profile.home, withDestinationURL: root)
         XCTAssertThrowsError(try profiles.prepare(profile))
+    }
+
+    func testPrepareRejectsShortcutPointingToAnotherProfile() throws {
+        let profile = profiles.profile(for: UUID())
+        try FileManager.default.createDirectory(at: profile.launchHome.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: profile.launchHome, withDestinationURL: root)
+        XCTAssertThrowsError(try profiles.prepare(profile))
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: profile.launchHome.path), root.path)
     }
 
     private func writeAuth(email: String, to url: URL) throws {
