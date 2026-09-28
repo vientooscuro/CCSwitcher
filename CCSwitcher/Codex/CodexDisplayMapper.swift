@@ -17,7 +17,14 @@ enum CodexDisplayMapper {
 
     static func planBadge(from planType: String?) -> String? {
         guard let planType, !planType.isEmpty else { return nil }
-        return planType.prefix(1).uppercased() + planType.dropFirst()
+        let displayType = planType.hasPrefix("self_serve_") ? String(planType.dropFirst("self_serve_".count)) : planType
+        return displayType
+            .replacingOccurrences(of: "_", with: " ")
+            .split(separator: " ")
+            .map { word in
+                word == "prolite" ? "Pro Lite" : word.prefix(1).uppercased() + word.dropFirst()
+            }
+            .joined(separator: " ")
     }
 
     static func windows(from snapshot: CodexRateLimitSnapshot) -> [UsageWindowModel] {

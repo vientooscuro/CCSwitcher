@@ -117,7 +117,8 @@ final class CodexUsageMappingTests: XCTestCase {
 
     func testPlanBadgeIsCapitalized() {
         XCTAssertEqual(CodexDisplayMapper.planBadge(from: "pro"), "Pro")
-        XCTAssertEqual(CodexDisplayMapper.planBadge(from: "prolite"), "Prolite")
+        XCTAssertEqual(CodexDisplayMapper.planBadge(from: "prolite"), "Pro Lite")
+        XCTAssertEqual(CodexDisplayMapper.planBadge(from: "self_serve_business_prolite"), "Business Pro Lite")
         XCTAssertNil(CodexDisplayMapper.planBadge(from: nil))
     }
 

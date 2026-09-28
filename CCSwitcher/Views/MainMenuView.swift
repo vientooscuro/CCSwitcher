@@ -260,16 +260,20 @@ struct MainMenuView: View {
 
             VStack(alignment: .leading, spacing: 3) {
                 if let header = hub.surface.header {
-                    HStack(spacing: 6) {
-                        Text(header.title)
-                            .font(.headline)
-                        if let plan = header.planBadge {
-                            Badge(text: plan, color: theme.accent, foreground: theme.accentForeground)
-                        }
-                    }
+                    Text(header.title)
+                        .font(.headline)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                     Text(header.subtitle)
                         .font(.caption)
                         .foregroundStyle(theme.textSecondary)
+                        .lineLimit(1)
+                    if let plan = header.planBadge {
+                        Text(plan)
+                            .font(.caption2)
+                            .foregroundStyle(theme.textSecondary)
+                            .lineLimit(1)
+                    }
                 } else {
                     Text("CCSwitcher")
                         .font(.headline)

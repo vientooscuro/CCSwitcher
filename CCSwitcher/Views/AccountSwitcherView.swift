@@ -55,16 +55,18 @@ struct AccountSwitcherView: View {
     // MARK: - Account Row
 
     private func accountRow(_ row: AccountRowModel) -> some View {
-        HStack(alignment: .center, spacing: 12) {
-            ProviderIcon(provider: hub.activeProvider, size: 22)
-                .foregroundStyle(row.isActive ? theme.accent : .secondary)
-                .frame(width: 32, height: 32)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center, spacing: 12) {
+                ProviderIcon(provider: hub.activeProvider, size: 22)
+                    .foregroundStyle(row.isActive ? theme.accent : .secondary)
+                    .frame(width: 32, height: 32)
 
-            accountIdentity(row)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                accountIdentity(row)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
 
             accountActions(row)
-                .fixedSize(horizontal: true, vertical: false)
+                .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .padding(14)
         .background(

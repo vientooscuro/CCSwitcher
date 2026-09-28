@@ -128,7 +128,7 @@ final class CodexState: ObservableObject, ProviderSurface {
         return AccountHeaderModel(
             title: account.effectiveDisplayName(obfuscated: obfuscate),
             subtitle: account.displayEmail(obfuscated: obfuscate),
-            planBadge: account.displaySubscriptionType
+            planBadge: CodexDisplayMapper.planBadge(from: account.subscriptionType)
         )
     }
 
@@ -143,7 +143,7 @@ final class CodexState: ObservableObject, ProviderSurface {
                 id: account.id,
                 title: account.effectiveDisplayName(obfuscated: obfuscate),
                 subtitle: account.displayEmail(obfuscated: obfuscate),
-                planBadge: account.displaySubscriptionType,
+                planBadge: CodexDisplayMapper.planBadge(from: account.subscriptionType),
                 isActive: account.isActive,
                 windows: effectiveSnapshot.map(CodexDisplayMapper.windows(from:)) ?? [],
                 scopedLimits: effectiveSnapshot.map(CodexDisplayMapper.scopedLimits(from:)) ?? [],
@@ -161,7 +161,7 @@ final class CodexState: ObservableObject, ProviderSurface {
                 id: account.id,
                 title: account.effectiveDisplayName(obfuscated: obfuscate),
                 email: account.displayEmail(obfuscated: obfuscate),
-                planBadge: account.displaySubscriptionType,
+                planBadge: CodexDisplayMapper.planBadge(from: account.subscriptionType),
                 isActive: account.isActive,
                 lastUsedText: account.lastUsed.map { Formatters.monthDay.string(from: $0) },
                 hasStoredCredentials: true,
@@ -187,7 +187,7 @@ final class CodexState: ObservableObject, ProviderSurface {
             [CodexDisplayMapper.widgetAccount(
                 email: account.displayEmail(obfuscated: obfuscate),
                 displayName: account.effectiveDisplayName(obfuscated: obfuscate),
-                planBadge: account.displaySubscriptionType,
+                planBadge: CodexDisplayMapper.planBadge(from: account.subscriptionType),
                 windows: card?.windows ?? [],
                 scopedLimits: card?.scopedLimits ?? [],
                 credits: card?.credits,
