@@ -93,6 +93,7 @@
 "Add Account" = "Ajouter un compte";
 "Re-authenticate (fix stale token)" = "Réauthentifier (réparer le jeton expiré)";
 "Remove account" = "Supprimer le compte";
+"Remove" = "Supprimer";
 
 /* Usage Chart */
 "No Data" = "Aucune donnée";

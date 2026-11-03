@@ -7,6 +7,7 @@ struct AccountSwitcherView: View {
     @State private var showingAddConfirm = false
     @State private var editingAccountId: UUID?
     @State private var editingLabel = ""
+    @State private var confirmingRemoveId: UUID?
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -29,6 +30,10 @@ struct AccountSwitcherView: View {
                 .padding(.horizontal, 16)
                 .padding(.bottom, 12)
                 .padding(.top, 8)
+        }
+        // Don't greet the next opening of the popover with a pending removal.
+        .onReceive(NotificationCenter.default.publisher(for: NSPopover.didCloseNotification)) { _ in
+            confirmingRemoveId = nil
         }
     }
 
@@ -149,6 +154,31 @@ struct AccountSwitcherView: View {
 
     @ViewBuilder
     private func accountActions(_ row: AccountRowModel) -> some View {
+        if confirmingRemoveId == row.id {
+            // Confirm in place: an alert would take key status from the popover and close it.
+            HStack(spacing: 12) {
+                Button("Cancel") {
+                    confirmingRemoveId = nil
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button("Remove", role: .destructive) {
+                    confirmingRemoveId = nil
+                    hub.surface.removeAccount(id: row.id)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .tint(.red)
+                .help("Remove account")
+            }
+        } else {
+            regularAccountActions(row)
+        }
+    }
+
+    @ViewBuilder
+    private func regularAccountActions(_ row: AccountRowModel) -> some View {
         HStack(spacing: 12) {
             if hub.surface.capabilities.canSwitchAccounts, !row.isActive || hub.activeProvider == .codex {
                 Button(hub.activeProvider == .codex ? "Open Codex" : "Switch") {
@@ -187,7 +217,7 @@ struct AccountSwitcherView: View {
 
             if hub.surface.capabilities.managesAccounts {
                 Button {
-                    hub.surface.removeAccount(id: row.id)
+                    confirmingRemoveId = row.id
                 } label: {
                     Image(systemName: "trash")
                         .font(.caption)

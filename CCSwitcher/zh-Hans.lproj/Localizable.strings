@@ -93,6 +93,7 @@
 "Add Account" = "添加账户";
 "Re-authenticate (fix stale token)" = "重新认证（修复过期令牌）";
 "Remove account" = "移除账户";
+"Remove" = "移除";
 
 /* Usage Chart */
 "No Data" = "无数据";

@@ -93,6 +93,7 @@
 "Add Account" = "アカウントを追加";
 "Re-authenticate (fix stale token)" = "再認証（期限切れトークンの修復）";
 "Remove account" = "アカウントを削除";
+"Remove" = "削除";
 
 /* Usage Chart */
 "No Data" = "データなし";

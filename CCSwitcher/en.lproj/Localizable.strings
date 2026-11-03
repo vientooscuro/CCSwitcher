@@ -93,6 +93,7 @@
 "Add Account" = "Add Account";
 "Re-authenticate (fix stale token)" = "Re-authenticate (fix stale token)";
 "Remove account" = "Remove account";
+"Remove" = "Remove";
 
 /* Usage Chart */
 "No Data" = "No Data";

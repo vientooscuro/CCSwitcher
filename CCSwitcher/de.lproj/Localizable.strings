@@ -93,6 +93,7 @@
 "Add Account" = "Konto hinzufügen";
 "Re-authenticate (fix stale token)" = "Erneut authentifizieren (abgelaufenes Token reparieren)";
 "Remove account" = "Konto entfernen";
+"Remove" = "Entfernen";
 
 /* Usage Chart */
 "No Data" = "Keine Daten";
