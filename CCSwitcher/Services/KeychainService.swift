@@ -125,6 +125,8 @@ actor KeychainService {
 
     /// In-memory mirror of the backup store. Loaded lazily.
     private var backupCache: [String: AccountBackup]?
+    private var backupReadRetryAfter: Date?
+    private static let backupReadRetryInterval: TimeInterval = 60
 
     private init() {
         self.claudeAccount = NSUserName()
@@ -278,17 +280,22 @@ actor KeychainService {
     private let appBackupService = "com.vientooscuro.ccswitcher.backups"
     private let appBackupAccount = "all-accounts"
 
+    enum BackupItemRead {
+        case data(Data)
+        case notFound
+        case failed
+    }
+
     enum BackupStoreLoad {
         case loaded([String: AccountBackup])
         case absent
         case failed
     }
 
-    static func parseBackupStore(_ read: SecurityRead) -> BackupStoreLoad {
+    static func parseBackupStore(_ read: BackupItemRead) -> BackupStoreLoad {
         switch read {
-        case .value(let raw):
-            guard let data = raw.data(using: .utf8),
-                  let dict = try? JSONDecoder().decode([String: AccountBackup].self, from: data) else { return .failed }
+        case .data(let data):
+            guard let dict = try? JSONDecoder().decode([String: AccountBackup].self, from: data) else { return .failed }
             return .loaded(dict)
         case .notFound:
             return .absent
@@ -297,25 +304,53 @@ actor KeychainService {
         }
     }
 
+    /// Reads with the same client that writes the item. Going through the
+    /// `security` tool made macOS ask on every read once its access was lost,
+    /// and its 5 s timeout closed the prompt while the password was being typed.
+    private func readBackupItem() -> BackupItemRead {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: appBackupService,
+            kSecAttrAccount as String: appBackupAccount,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        switch status {
+        case errSecSuccess:
+            guard let data = item as? Data else { return .failed }
+            return .data(data)
+        case errSecItemNotFound:
+            return .notFound
+        default:
+            log.error("[loadBackupStore] Read failed, OSStatus: \(status)")
+            return .failed
+        }
+    }
+
     /// Returns nil when the store could not be read. That is never the same as
     /// an empty store: every save writes the whole store back, so treating a
-    /// slow `security` call as "no backups" would erase the other accounts. A
-    /// failure isn't cached, so the next call reads again.
+    /// failed read as "no backups" would erase the other accounts. Failures
+    /// aren't cached, but retries wait so a denied prompt doesn't come straight
+    /// back.
     private func loadBackupStore() -> [String: AccountBackup]? {
         if let cached = backupCache {
             return cached
         }
+        if let backupReadRetryAfter, Date() < backupReadRetryAfter {
+            return nil
+        }
 
-        switch Self.parseBackupStore(readSecurity(args: [
-            "find-generic-password", "-s", appBackupService,
-            "-a", appBackupAccount, "-w"
-        ])) {
+        switch Self.parseBackupStore(readBackupItem()) {
         case .loaded(let dict):
             log.debug("[loadBackupStore] Loaded \(dict.count) entries from Keychain")
             backupCache = dict
+            backupReadRetryAfter = nil
             return dict
         case .failed:
             log.error("[loadBackupStore] Could not read the store from Keychain")
+            backupReadRetryAfter = Date().addingTimeInterval(Self.backupReadRetryInterval)
             return nil
         case .absent:
             break
@@ -376,20 +411,11 @@ actor KeychainService {
 
     // MARK: - `security` CLI (only for Claude's keychain entry)
 
-    enum SecurityRead {
-        case value(String)
-        case notFound
-        case failed
-    }
-
-    /// `security` exit status for errSecItemNotFound.
-    private static let securityItemNotFoundExit: Int32 = 44
+    /// A read can wait on a keychain access prompt, and killing `security`
+    /// closes that prompt, so allow enough time to type the password.
+    private static let securityReadTimeout: TimeInterval = 60
 
     private func runSecurity(args: [String]) -> String? {
-        if case .value(let output) = readSecurity(args: args) { output } else { nil }
-    }
-
-    private func readSecurity(args: [String]) -> SecurityRead {
         let process = Process()
         let pipe = Pipe()
 
@@ -400,21 +426,21 @@ actor KeychainService {
 
         do {
             try process.run()
-            let result = ProcessWaiter.waitUntilExit(process, capturing: pipe, timeout: 5)
+            let result = ProcessWaiter.waitUntilExit(process, capturing: pipe, timeout: Self.securityReadTimeout)
             guard result.completed else {
-                log.warning("[runSecurity] Timed out after 5s")
-                return .failed
+                log.warning("[runSecurity] Timed out after \(Int(Self.securityReadTimeout))s")
+                return nil
             }
             guard process.terminationStatus == 0 else {
                 log.debug("[runSecurity] Exit \(process.terminationStatus) for: security \(args.prefix(3).joined(separator: " "))...")
-                return process.terminationStatus == Self.securityItemNotFoundExit ? .notFound : .failed
+                return nil
             }
-            guard let output = String(data: result.output, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines) else { return .failed }
-            return output.isEmpty ? .notFound : .value(output)
+            let output = String(data: result.output, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return output?.isEmpty == true ? nil : output
         } catch {
             log.error("[runSecurity] Launch failed: \(error.localizedDescription)")
-            return .failed
+            return nil
         }
     }
 

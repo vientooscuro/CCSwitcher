@@ -15,10 +15,12 @@ actor CodexAccountStore {
 
     /// In-memory mirror of the backup store. Loaded lazily.
     private var backupCache: [String: String]?
+    private var backupReadRetryAfter: Date?
+    private static let backupReadRetryInterval: TimeInterval = 60
 
     /// Entire `auth.json` text for `accountId`, or nil.
     func backup(forAccountId accountId: String) -> String? {
-        let backup = loadBackupStore()[accountId]
+        let backup = loadBackupStore()?[accountId]
         if let backup {
             log.info("[backup] Found for \(accountId), length=\(backup.count)")
         } else {
@@ -29,7 +31,10 @@ actor CodexAccountStore {
 
     func saveBackup(_ authJSON: String, forAccountId accountId: String) -> Bool {
         log.info("[saveBackup] Saving for \(accountId), length=\(authJSON.count)")
-        var store = loadBackupStore()
+        guard var store = loadBackupStore() else {
+            log.error("[saveBackup] Store unreadable, refusing to overwrite it")
+            return false
+        }
         store[accountId] = authJSON
         let result = saveBackupStore(store)
         if result { backupCache = store }
@@ -40,7 +45,10 @@ actor CodexAccountStore {
     @discardableResult
     func removeBackup(forAccountId accountId: String) -> Bool {
         log.info("[removeBackup] Removing for accountId=\(accountId)")
-        var store = loadBackupStore()
+        guard var store = loadBackupStore() else {
+            log.error("[removeBackup] Store unreadable, refusing to overwrite it")
+            return false
+        }
         store.removeValue(forKey: accountId)
         let ok = saveBackupStore(store)
         if ok { backupCache = store }
@@ -49,7 +57,7 @@ actor CodexAccountStore {
 
     /// Ids that currently have a backup, from one store read.
     func backedUpAccountIds() -> Set<String> {
-        Set(loadBackupStore().keys)
+        loadBackupStore().map { Set($0.keys) } ?? []
     }
 
     // MARK: - Serialization (pure, testable)
@@ -74,9 +82,14 @@ actor CodexAccountStore {
 
     // MARK: - Keychain operations
 
-    private func loadBackupStore() -> [String: String] {
+    /// Returns nil when the item could not be read, which must not look like an
+    /// empty store: every save writes the whole store back.
+    private func loadBackupStore() -> [String: String]? {
         if let cached = backupCache {
             return cached
+        }
+        if let backupReadRetryAfter, Date() < backupReadRetryAfter {
+            return nil
         }
 
         let query: [String: Any] = [
@@ -94,7 +107,13 @@ actor CodexAccountStore {
             let dict = Self.decodeLenient(data)
             log.debug("[loadBackupStore] Loaded \(dict.count) entries from Keychain")
             backupCache = dict
+            backupReadRetryAfter = nil
             return dict
+        }
+        guard status == errSecItemNotFound else {
+            log.error("[loadBackupStore] Read failed, OSStatus: \(status)")
+            backupReadRetryAfter = Date().addingTimeInterval(Self.backupReadRetryInterval)
+            return nil
         }
 
         log.debug("[loadBackupStore] No existing backups, returning empty")

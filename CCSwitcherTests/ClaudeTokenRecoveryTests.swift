@@ -48,8 +48,8 @@ final class ClaudeTokenRecoveryTests: XCTestCase {
     // MARK: - Backup store loading
 
     func testValidStoreIsLoaded() {
-        let raw = #"{"account-id":{"token":"t","oauthAccount":{"emailAddress":"a@b.c"}}}"#
-        guard case .loaded(let store) = KeychainService.parseBackupStore(.value(raw)) else {
+        let raw = Data(#"{"account-id":{"token":"t","oauthAccount":{"emailAddress":"a@b.c"}}}"#.utf8)
+        guard case .loaded(let store) = KeychainService.parseBackupStore(.data(raw)) else {
             return XCTFail("expected a loaded store")
         }
         XCTAssertEqual(store["account-id"]?.token, "t")
@@ -63,12 +63,12 @@ final class ClaudeTokenRecoveryTests: XCTestCase {
 
     func testReadFailureIsNotTreatedAsAnEmptyStore() {
         guard case .failed = KeychainService.parseBackupStore(.failed) else {
-            return XCTFail("a timed-out read must not look like an empty store")
+            return XCTFail("a failed read must not look like an empty store")
         }
     }
 
     func testUndecodableStoreIsNotTreatedAsAnEmptyStore() {
-        guard case .failed = KeychainService.parseBackupStore(.value("not json")) else {
+        guard case .failed = KeychainService.parseBackupStore(.data(Data("not json".utf8))) else {
             return XCTFail("an unreadable item must not be overwritten as if it were empty")
         }
     }
