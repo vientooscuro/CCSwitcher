@@ -18,6 +18,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private var providerHub: ProviderHub?
     private var menuBarConfig: MenuBarConfig?
     private var installed = false
+    /// A transient popover can close on mouse-down of the click on its own icon.
+    /// The button's action follows on mouse-up and must not reopen it.
+    private var closedByStatusItemPressAt: Date?
 
     func install(appState: AppState, hub: ProviderHub, config: MenuBarConfig, locale: Locale) {
         guard !installed else { return }
@@ -116,9 +119,25 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         guard let popover else { return }
         if popover.isShown {
             popover.performClose(sender)
+        } else if let closedAt = closedByStatusItemPressAt, Date().timeIntervalSince(closedAt) < 1 {
+            closedByStatusItemPressAt = nil
         } else {
             popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
         }
+    }
+
+    func popoverWillClose(_ notification: Notification) {
+        closedByStatusItemPressAt = isPressingStatusItem() ? Date() : nil
+    }
+
+    /// True while a mouse button is held down over the item's whole slot in the
+    /// menu bar. The button's bounds stop short of the screen's top edge, where
+    /// menu bar clicks often land.
+    private func isPressingStatusItem() -> Bool {
+        guard NSEvent.pressedMouseButtons != 0,
+              let slot = statusItem?.button?.window?.frame else { return false }
+        let p = NSEvent.mouseLocation
+        return p.x >= slot.minX && p.x <= slot.maxX && p.y >= slot.minY && p.y <= slot.maxY + 1
     }
 }
