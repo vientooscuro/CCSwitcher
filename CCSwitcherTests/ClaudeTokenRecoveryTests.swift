@@ -45,6 +45,34 @@ final class ClaudeTokenRecoveryTests: XCTestCase {
         XCTAssertNil(target)
     }
 
+    // MARK: - Backup store loading
+
+    func testValidStoreIsLoaded() {
+        let raw = #"{"account-id":{"token":"t","oauthAccount":{"emailAddress":"a@b.c"}}}"#
+        guard case .loaded(let store) = KeychainService.parseBackupStore(.value(raw)) else {
+            return XCTFail("expected a loaded store")
+        }
+        XCTAssertEqual(store["account-id"]?.token, "t")
+    }
+
+    func testOnlyAMissingItemMeansThereAreNoBackups() {
+        guard case .absent = KeychainService.parseBackupStore(.notFound) else {
+            return XCTFail("expected absent")
+        }
+    }
+
+    func testReadFailureIsNotTreatedAsAnEmptyStore() {
+        guard case .failed = KeychainService.parseBackupStore(.failed) else {
+            return XCTFail("a timed-out read must not look like an empty store")
+        }
+    }
+
+    func testUndecodableStoreIsNotTreatedAsAnEmptyStore() {
+        guard case .failed = KeychainService.parseBackupStore(.value("not json")) else {
+            return XCTFail("an unreadable item must not be overwritten as if it were empty")
+        }
+    }
+
     // MARK: - Refresh error classification
 
     func testOnlyInvalidGrantMeansTheTokenIsDead() {

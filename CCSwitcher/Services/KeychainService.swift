@@ -227,7 +227,10 @@ actor KeychainService {
     func saveAccountBackup(token: String, oauthAccount: [String: AnyCodable], forAccountId accountId: String) -> Bool {
         let email = (oauthAccount["emailAddress"]?.value as? String) ?? "?"
         log.info("[saveBackup] Saving for \(accountId) (\(email)), token length=\(token.count)")
-        var store = loadBackupStore()
+        guard var store = loadBackupStore() else {
+            log.error("[saveBackup] Store unreadable, refusing to overwrite it")
+            return false
+        }
         store[accountId] = AccountBackup(token: token, oauthAccount: oauthAccount)
         let result = saveBackupStore(store)
         if result { backupCache = store }
@@ -236,7 +239,10 @@ actor KeychainService {
     }
 
     func getAccountBackup(forAccountId accountId: String) -> AccountBackup? {
-        let store = loadBackupStore()
+        guard let store = loadBackupStore() else {
+            log.error("[getBackup] Store unreadable, no answer for accountId=\(accountId)")
+            return nil
+        }
         let backup = store[accountId]
         if let backup {
             let email = (backup.oauthAccount["emailAddress"]?.value as? String) ?? "?"
@@ -251,13 +257,16 @@ actor KeychainService {
     /// Returns ids only — callers that need a token still ask for it by id, so
     /// this can be called freely without moving secrets around.
     func backedUpAccountIds() -> Set<String> {
-        Set(loadBackupStore().keys)
+        loadBackupStore().map { Set($0.keys) } ?? []
     }
 
     @discardableResult
     func removeAccountBackup(forAccountId accountId: String) -> Bool {
         log.info("[removeBackup] Removing for accountId=\(accountId)")
-        var store = loadBackupStore()
+        guard var store = loadBackupStore() else {
+            log.error("[removeBackup] Store unreadable, refusing to overwrite it")
+            return false
+        }
         store.removeValue(forKey: accountId)
         let ok = saveBackupStore(store)
         if ok { backupCache = store }
@@ -269,19 +278,47 @@ actor KeychainService {
     private let appBackupService = "com.vientooscuro.ccswitcher.backups"
     private let appBackupAccount = "all-accounts"
 
-    private func loadBackupStore() -> [String: AccountBackup] {
+    enum BackupStoreLoad {
+        case loaded([String: AccountBackup])
+        case absent
+        case failed
+    }
+
+    static func parseBackupStore(_ read: SecurityRead) -> BackupStoreLoad {
+        switch read {
+        case .value(let raw):
+            guard let data = raw.data(using: .utf8),
+                  let dict = try? JSONDecoder().decode([String: AccountBackup].self, from: data) else { return .failed }
+            return .loaded(dict)
+        case .notFound:
+            return .absent
+        case .failed:
+            return .failed
+        }
+    }
+
+    /// Returns nil when the store could not be read. That is never the same as
+    /// an empty store: every save writes the whole store back, so treating a
+    /// slow `security` call as "no backups" would erase the other accounts. A
+    /// failure isn't cached, so the next call reads again.
+    private func loadBackupStore() -> [String: AccountBackup]? {
         if let cached = backupCache {
             return cached
         }
 
-        if let raw = runSecurity(args: [
+        switch Self.parseBackupStore(readSecurity(args: [
             "find-generic-password", "-s", appBackupService,
             "-a", appBackupAccount, "-w"
-        ]), let data = raw.data(using: .utf8),
-           let dict = try? JSONDecoder().decode([String: AccountBackup].self, from: data) {
+        ])) {
+        case .loaded(let dict):
             log.debug("[loadBackupStore] Loaded \(dict.count) entries from Keychain")
             backupCache = dict
             return dict
+        case .failed:
+            log.error("[loadBackupStore] Could not read the store from Keychain")
+            return nil
+        case .absent:
+            break
         }
 
         // One-shot migration from local file
@@ -339,7 +376,20 @@ actor KeychainService {
 
     // MARK: - `security` CLI (only for Claude's keychain entry)
 
+    enum SecurityRead {
+        case value(String)
+        case notFound
+        case failed
+    }
+
+    /// `security` exit status for errSecItemNotFound.
+    private static let securityItemNotFoundExit: Int32 = 44
+
     private func runSecurity(args: [String]) -> String? {
+        if case .value(let output) = readSecurity(args: args) { output } else { nil }
+    }
+
+    private func readSecurity(args: [String]) -> SecurityRead {
         let process = Process()
         let pipe = Pipe()
 
@@ -353,18 +403,18 @@ actor KeychainService {
             let result = ProcessWaiter.waitUntilExit(process, capturing: pipe, timeout: 5)
             guard result.completed else {
                 log.warning("[runSecurity] Timed out after 5s")
-                return nil
+                return .failed
             }
             guard process.terminationStatus == 0 else {
                 log.debug("[runSecurity] Exit \(process.terminationStatus) for: security \(args.prefix(3).joined(separator: " "))...")
-                return nil
+                return process.terminationStatus == Self.securityItemNotFoundExit ? .notFound : .failed
             }
-            let output = String(data: result.output, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            return output?.isEmpty == true ? nil : output
+            guard let output = String(data: result.output, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) else { return .failed }
+            return output.isEmpty ? .notFound : .value(output)
         } catch {
             log.error("[runSecurity] Launch failed: \(error.localizedDescription)")
-            return nil
+            return .failed
         }
     }
 
