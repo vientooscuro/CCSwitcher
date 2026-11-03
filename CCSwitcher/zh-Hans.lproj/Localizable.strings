@@ -130,6 +130,9 @@
 "Could not capture credentials" = "无法获取凭据";
 "No stored credentials for %@. Use re-authenticate to fix." = "没有 %@ 的存储凭据。请使用重新认证来修复。";
 "The stored credentials for %@ are empty. Use re-authenticate to sign in again." = "%@ 的已保存凭据为空。请重新认证以再次登录。";
+"Claude reports %@, but the stored sign-in still belongs to %@. Switch accounts once, then add." = "Claude 报告的账号是 %1$@，但保存的登录凭据仍属于 %2$@。请先切换一次账号，再添加。";
+"Claude reports %@, but the stored sign-in is still %@'s — another Claude Code session rewrote the identity. Switch accounts once to re-sync." = "Claude 报告的账号是 %1$@，但保存的登录凭据仍是 %2$@ 的 —— 另一个 Claude Code 会话改写了账号标识。请切换一次账号以重新同步。";
+"Can't tell which account the current sign-in belongs to. Switch accounts once to re-sync." = "无法确定当前登录凭据属于哪个账号。请切换一次账号以重新同步。";
 "Logged in as %@, but expected %@. Credentials not updated." = "登录账户为 %1$@，但预期为 %2$@。凭据未更新。";
 "Token expired. Switch to refresh." = "令牌已过期。切换以刷新。";
 "Token expired. Switch to this account to refresh." = "令牌已过期。切换到此账户以刷新。";

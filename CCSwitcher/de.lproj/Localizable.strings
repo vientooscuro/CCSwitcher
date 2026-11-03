@@ -130,6 +130,9 @@
 "Could not capture credentials" = "Anmeldedaten konnten nicht erfasst werden";
 "No stored credentials for %@. Use re-authenticate to fix." = "Keine gespeicherten Anmeldedaten für %@. Verwenden Sie Erneut authentifizieren zur Behebung.";
 "The stored credentials for %@ are empty. Use re-authenticate to sign in again." = "Die gespeicherten Anmeldedaten für %@ sind leer. Authentifizieren Sie sich erneut, um sich wieder anzumelden.";
+"Claude reports %@, but the stored sign-in still belongs to %@. Switch accounts once, then add." = "Claude meldet %1$@, aber die gespeicherte Anmeldung gehört weiterhin %2$@. Wechsle einmal das Konto und füge es dann hinzu.";
+"Claude reports %@, but the stored sign-in is still %@'s — another Claude Code session rewrote the identity. Switch accounts once to re-sync." = "Claude meldet %1$@, aber die gespeicherte Anmeldung gehört weiterhin %2$@ – eine andere Claude-Code-Sitzung hat die Identität überschrieben. Wechsle einmal das Konto, um neu zu synchronisieren.";
+"Can't tell which account the current sign-in belongs to. Switch accounts once to re-sync." = "Es lässt sich nicht feststellen, zu welchem Konto die aktuelle Anmeldung gehört. Wechsle einmal das Konto, um neu zu synchronisieren.";
 "Logged in as %@, but expected %@. Credentials not updated." = "Angemeldet als %1$@, aber %2$@ erwartet. Anmeldedaten nicht aktualisiert.";
 "Token expired. Switch to refresh." = "Token abgelaufen. Wechseln zum Aktualisieren.";
 "Token expired. Switch to this account to refresh." = "Token abgelaufen. Zu diesem Konto wechseln zum Aktualisieren.";

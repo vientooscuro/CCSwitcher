@@ -541,7 +541,7 @@ final class ClaudeService: @unchecked Sendable {
     /// Switches credentials and verifies. Returns the verified `AuthStatus`
     /// so the caller can avoid running `claude auth status` a second time.
     @discardableResult
-    func switchAccount(from currentAccount: Account, to targetAccount: Account) async throws -> AuthStatus {
+    func switchAccount(from currentAccount: Account, to targetAccount: Account, liveCredentialIsSource: Bool) async throws -> AuthStatus {
         let keychain = KeychainService.shared
 
         log.info("[switchAccount] Switching from \(currentAccount.id) to \(targetAccount.id)")
@@ -552,22 +552,11 @@ final class ClaudeService: @unchecked Sendable {
         let sourceOAuth = await keychain.readOAuthAccount()
 
         log.info("[switchAccount] Step 1: Backing up current account...")
-        if let sourceToken, let sourceOAuth {
-            let email = (sourceOAuth["emailAddress"]?.value as? String) ?? "?"
-            // Require BOTH the oauthAccount email and an authoritative `auth
-            // status` identity to agree the live token is the source account.
-            // The source is still live at this step, so `auth status` reflects
-            // its token — this blocks a token↔oauthAccount desync from stashing
-            // a foreign token under the source's backup slot.
-            if email == currentAccount.email, await liveTokenIdentityMatches(currentAccount.email),
-               await liveCredentialsConsistentWithBackup(accountId: currentAccount.id.uuidString, liveToken: sourceToken, liveOAuth: sourceOAuth) {
-                let saved = await keychain.saveAccountBackup(token: sourceToken, oauthAccount: sourceOAuth, forAccountId: currentAccount.id.uuidString)
-                log.info("[switchAccount] Step 1: Backup saved: \(saved)")
-            } else {
-                log.warning("[switchAccount] Step 1: identity/consistency check failed (oauthAccount=\(email), source=\(currentAccount.email)); skipping backup to avoid persisting a desynced live slot")
-            }
+        if liveCredentialIsSource {
+            let saved = await backUpLiveCredential(for: currentAccount)
+            log.info("[switchAccount] Step 1: Backup saved: \(saved)")
         } else {
-            log.warning("[switchAccount] Step 1: Could not read current token or oauthAccount")
+            log.warning("[switchAccount] Step 1: Live credential is not confirmed to be \(currentAccount.email)'s; skipping its backup")
         }
 
         log.info("[switchAccount] Step 2: Reading backup for target account...")
@@ -580,6 +569,9 @@ final class ClaudeService: @unchecked Sendable {
         guard targetBackup.hasUsableCredentials else {
             log.error("[switchAccount] Step 2: Target backup carries no OAuth secret")
             throw ClaudeServiceError.backupCredentialsUnusable(email: targetAccount.email)
+        }
+        if !liveCredentialIsSource {
+            await salvageForeignLiveToken(restoring: targetBackup, accountId: targetAccount.id.uuidString)
         }
 
         // Step 3 replaces the live credentials before Step 4 can judge them, so
@@ -660,55 +652,34 @@ final class ClaudeService: @unchecked Sendable {
         }
     }
 
-    /// Restore the live credential slot (keychain token + `~/.claude.json`
-    /// oauthAccount) from this account's known-good backup.
-    ///
-    /// Used to self-heal a desynced live slot: the Claude CLI can leave the
-    /// keychain token and the oauthAccount file describing different accounts
-    /// (e.g. another account's team token paired with this account's identity),
-    /// which makes the usage endpoint report a foreign plan's limits. Since the
-    /// backup is the last credential pair we verified, writing it back restores
-    /// a coherent live slot without making the user re-authenticate.
-    ///
-    /// Writes oauthAccount first, token second, mirroring `switchAccount`, and
-    /// rolls the file back if the token write fails so we never leave a
-    /// half-applied pair. The backup's access token is typically stale, so the
-    /// CLI is asked to refresh it — it must remain the single writer of the live
-    /// token (see the `.expired` handling in `fetchAllAccountUsage`).
-    func restoreLiveSlotFromBackup(accountId: String, email: String) async -> Bool {
+    /// Store the live token as `account`'s. The caller has established through
+    /// the credential anchor that it is. `~/.claude.json` may still name someone
+    /// else, so its block is kept only when it agrees; otherwise the identity
+    /// already on file stays, and a later switch can't write a foreign one.
+    func backUpLiveCredential(for account: Account) async -> Bool {
         let keychain = KeychainService.shared
-        guard let backup = await keychain.getAccountBackup(forAccountId: accountId) else {
-            log.error("[restore] No known-good backup for \(email); cannot self-heal")
-            return false
-        }
-        guard backup.hasUsableCredentials else {
-            log.error("[restore] Backup for \(email) carries no OAuth secret; cannot self-heal")
-            return false
-        }
-        await salvageForeignLiveToken(restoring: backup, accountId: accountId)
-        let previousOAuth = await keychain.readOAuthAccount()
+        let accountId = account.id.uuidString
+        guard let token = await keychain.readClaudeToken() else { return false }
 
-        log.info("[restore] Restoring live slot for \(email) from known-good backup")
-        guard await keychain.writeOAuthAccount(backup.oauthAccount) else {
-            log.error("[restore] Failed to write oauthAccount for \(email)")
+        let liveOAuth = await keychain.readOAuthAccount()
+        let oauthAccount = liveOAuth?["emailAddress"]?.value as? String == account.email
+            ? liveOAuth
+            : await keychain.getAccountBackup(forAccountId: accountId)?.oauthAccount
+        guard let oauthAccount else {
+            log.error("[backUpLive] No identity on file for \(accountId)")
             return false
         }
-        guard await keychain.writeClaudeToken(backup.token) else {
-            log.error("[restore] Failed to write token for \(email); rolling back oauthAccount")
-            if let previousOAuth { _ = await keychain.writeOAuthAccount(previousOAuth) }
+        guard AccountBackup(token: token, oauthAccount: oauthAccount).hasUsableCredentials else {
+            log.error("[backUpLive] Live token for \(accountId) carries no OAuth secret; keeping the stored backup")
             return false
         }
-
-        // Let the CLI mint a fresh access token from the restored refresh token.
-        _ = try? await getAuthStatus()
-        log.info("[restore] Live slot restored for \(email)")
-        return true
+        return await keychain.saveAccountBackup(token: token, oauthAccount: oauthAccount, forAccountId: accountId)
     }
 
-    /// The foreign token in a desynced live slot is usually the newest copy of
-    /// its owner's rotating refresh token: the owner's backup was rotated past
-    /// while it was active. Overwriting the slot would lose it and force a
-    /// re-auth, so move it into the owner's backup first.
+    /// When the live token's owner can't be confirmed, it may still be the
+    /// newest copy of someone's rotating refresh token: that account's backup
+    /// was rotated past while it was active. Overwriting the slot would lose it
+    /// and force a re-auth, so move it into the owner's backup first.
     private func salvageForeignLiveToken(restoring backup: AccountBackup, accountId: String) async {
         let keychain = KeychainService.shared
         guard let liveToken = await keychain.readClaudeToken() else { return }

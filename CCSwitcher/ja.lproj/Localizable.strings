@@ -130,6 +130,9 @@
 "Could not capture credentials" = "認証情報を取得できませんでした";
 "No stored credentials for %@. Use re-authenticate to fix." = "%@ の保存済み認証情報がありません。再認証で修復してください。";
 "The stored credentials for %@ are empty. Use re-authenticate to sign in again." = "%@ の保存済み認証情報が空です。再認証して、もう一度サインインしてください。";
+"Claude reports %@, but the stored sign-in still belongs to %@. Switch accounts once, then add." = "Claude は %1$@ と報告していますが、保存されているサインインは %2$@ のものです。一度アカウントを切り替えてから追加してください。";
+"Claude reports %@, but the stored sign-in is still %@'s — another Claude Code session rewrote the identity. Switch accounts once to re-sync." = "Claude は %1$@ と報告していますが、保存されているサインインは %2$@ のままです。別の Claude Code セッションが識別情報を書き換えました。一度アカウントを切り替えて再同期してください。";
+"Can't tell which account the current sign-in belongs to. Switch accounts once to re-sync." = "現在のサインインがどのアカウントのものか判別できません。一度アカウントを切り替えて再同期してください。";
 "Logged in as %@, but expected %@. Credentials not updated." = "%1$@ としてログインしましたが、%2$@ が期待されていました。認証情報は更新されません。";
 "Token expired. Switch to refresh." = "トークンが期限切れです。切り替えて更新してください。";
 "Token expired. Switch to this account to refresh." = "トークンが期限切れです。このアカウントに切り替えて更新してください。";
