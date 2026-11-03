@@ -70,13 +70,12 @@ final class AppState: ObservableObject {
     /// Cleared on success.
     private var accountUsageRateLimitedUntil: [UUID: Date] = [:]
 
-    /// Accounts whose stored refresh_token has been rejected by the OAuth
-    /// server (`invalid_grant`). Re-trying the same broken token just wastes
-    /// requests and is the fastest way to trip the usage endpoint's 429, so
-    /// the account is skipped until it is explicitly re-authenticated or
-    /// switched to (both re-issue credentials and clear the flag). It is NOT
-    /// cleared by a plain manual refresh — that only re-poked the dead token.
-    private var accountRefreshTokenInvalid: Set<UUID> = []
+    /// The refresh_token the OAuth server rejected (`invalid_grant`), per
+    /// account. Re-trying the same broken token just wastes requests and is the
+    /// fastest way to trip the usage endpoint's 429, so the account is skipped
+    /// while its stored token is still this one. Any new token (re-auth, a
+    /// salvage, the CLI writing the live slot) is retried on the next poll.
+    private var accountRejectedRefreshToken: [UUID: String] = [:]
 
     /// Per-account timestamp of the last usage fetch attempt. Inactive
     /// accounts change slowly and don't need polling every cycle, so they are
@@ -567,7 +566,7 @@ final class AppState: ObservableObject {
     /// block. Other accounts are left untouched.
     private func clearUsageBlocks(for accountId: UUID) {
         accountUsageRateLimitedUntil[accountId] = nil
-        accountRefreshTokenInvalid.remove(accountId)
+        accountRejectedRefreshToken[accountId] = nil
         accountUsageLastAttempt[accountId] = nil
         accountLastRestoreAttempt[accountId] = nil
     }
@@ -594,13 +593,6 @@ final class AppState: ObservableObject {
             if let until = accountUsageRateLimitedUntil[account.id], until > now {
                 let remaining = Int(until.timeIntervalSince(now))
                 log.info("[fetchUsage] Skipping \(account.email) — rate limited for \(remaining)s more")
-                if let existing = accountUsageErrors[account.id] {
-                    freshErrors[account.id] = existing
-                }
-                continue
-            }
-            if accountRefreshTokenInvalid.contains(account.id) {
-                log.info("[fetchUsage] Skipping \(account.email) — refresh_token invalid, awaiting re-auth")
                 if let existing = accountUsageErrors[account.id] {
                     freshErrors[account.id] = existing
                 }
@@ -658,10 +650,25 @@ final class AppState: ObservableObject {
             } else {
                 tokenJSON = await keychain.getAccountBackup(forAccountId: account.id.uuidString)?.token
             }
-            guard let tokenJSON, let accessToken = ClaudeService.extractAccessToken(from: tokenJSON) else {
+            guard let tokenJSON, let credentials = ClaudeService.extractCredentials(from: tokenJSON) else {
                 log.warning("[fetchUsage] No token for \(account.email), skipping")
+                if accountRejectedRefreshToken[account.id] != nil, let existing = accountUsageErrors[account.id] {
+                    freshErrors[account.id] = existing
+                }
                 continue
             }
+            if let rejected = accountRejectedRefreshToken[account.id] {
+                if credentials.refreshToken == rejected {
+                    log.info("[fetchUsage] Skipping \(account.email) — refresh_token invalid, awaiting re-auth")
+                    if let existing = accountUsageErrors[account.id] {
+                        freshErrors[account.id] = existing
+                    }
+                    continue
+                }
+                log.info("[fetchUsage] \(account.email): stored token changed since rejection, retrying")
+                accountRejectedRefreshToken[account.id] = nil
+            }
+            let accessToken = credentials.accessToken
             accountUsageLastAttempt[account.id] = now
             requests.append((account, accessToken))
         }
@@ -751,7 +758,7 @@ final class AppState: ObservableObject {
                             }
                             // Don't clobber the specific invalid_grant message that
                             // `performRefreshAndRetry` already wrote.
-                            if !accountRefreshTokenInvalid.contains(r.accountId) {
+                            if accountRejectedRefreshToken[r.accountId] == nil {
                                 accountUsage[r.accountId] = nil
                                 accountUsageErrors[r.accountId] = UsageErrorState(isExpired: true, isRateLimited: false, message: String(localized: "Session expired. Please re-authenticate this account in Claude Code.", bundle: L10n.bundle))
                             }
@@ -831,7 +838,7 @@ final class AppState: ObservableObject {
             refreshed = try await claudeService.refreshOAuthToken(currentTokenJSON: storedJSON)
         } catch ClaudeService.RefreshError.invalidGrant {
             log.error("[refresh] \(email): server rejected refresh_token (invalid_grant). Marking account as needing re-auth.")
-            accountRefreshTokenInvalid.insert(accountId)
+            accountRejectedRefreshToken[accountId] = ClaudeService.extractCredentials(from: storedJSON)?.refreshToken ?? ""
             accountUsage[accountId] = nil
             accountUsageErrors[accountId] = UsageErrorState(
                 isExpired: true,

@@ -433,11 +433,19 @@ final class ClaudeService: @unchecked Sendable {
     enum RefreshError: Error {
         /// No `refreshToken` in the stored envelope — the user must re-auth.
         case noRefreshToken
-        /// Server rejected the refresh_token (HTTP 4xx). Often means the
-        /// token has been revoked or rotated past it; user must re-auth.
+        /// Server answered `invalid_grant`: the token has been revoked or
+        /// rotated past it; user must re-auth.
         case invalidGrant
         case network(String)
         case decode(String)
+    }
+
+    /// Other 4xx (429, a proxy's 403) say nothing about the token itself, so
+    /// they must stay retryable instead of flagging the account for re-auth.
+    static func isInvalidGrant(status: Int, body: Data) -> Bool {
+        guard (400...499).contains(status),
+              let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else { return false }
+        return json["error"] as? String == "invalid_grant"
     }
 
     /// Refreshes the OAuth access token in-place. Reads `refreshToken` from
@@ -487,7 +495,7 @@ final class ClaudeService: @unchecked Sendable {
             let bodyPreview = String(data: respData, encoding: .utf8)?.prefix(300) ?? ""
             let status = http?.statusCode ?? -1
             log.error("[refreshOAuthToken] HTTP \(status): \(bodyPreview)")
-            if (400...499).contains(status) {
+            if Self.isInvalidGrant(status: status, body: respData) {
                 throw RefreshError.invalidGrant
             }
             throw RefreshError.network("HTTP \(status)")
@@ -648,6 +656,7 @@ final class ClaudeService: @unchecked Sendable {
             log.error("[restore] No known-good backup for \(email); cannot self-heal")
             return false
         }
+        await salvageForeignLiveToken(restoring: backup, accountId: accountId)
         let previousOAuth = await keychain.readOAuthAccount()
 
         log.info("[restore] Restoring live slot for \(email) from known-good backup")
@@ -665,6 +674,49 @@ final class ClaudeService: @unchecked Sendable {
         _ = try? await getAuthStatus()
         log.info("[restore] Live slot restored for \(email)")
         return true
+    }
+
+    /// The foreign token in a desynced live slot is usually the newest copy of
+    /// its owner's rotating refresh token: the owner's backup was rotated past
+    /// while it was active. Overwriting the slot would lose it and force a
+    /// re-auth, so move it into the owner's backup first.
+    private func salvageForeignLiveToken(restoring backup: AccountBackup, accountId: String) async {
+        let keychain = KeychainService.shared
+        guard let liveToken = await keychain.readClaudeToken() else { return }
+
+        var others: [(id: String, backup: AccountBackup)] = []
+        for id in await keychain.backedUpAccountIds() where id != accountId {
+            if let other = await keychain.getAccountBackup(forAccountId: id) {
+                others.append((id, other))
+            }
+        }
+        guard let targetId = Self.salvageTargetId(
+            liveToken: liveToken,
+            restoringToken: backup.token,
+            otherBackups: others.map { (id: $0.id, token: $0.backup.token) }
+        ), let target = others.first(where: { $0.id == targetId }) else { return }
+
+        let saved = await keychain.saveAccountBackup(token: liveToken, oauthAccount: target.backup.oauthAccount, forAccountId: targetId)
+        log.info("[restore] Salvaged live token into backup of \(targetId): \(saved)")
+    }
+
+    /// The account a foreign live token belongs to. The plan in the token blob
+    /// is the only identity it carries, so an ambiguous match returns nil rather
+    /// than risk filing the token under the wrong account.
+    static func salvageTargetId(liveToken: String, restoringToken: String, otherBackups: [(id: String, token: String)]) -> String? {
+        guard let live = extractCredentials(from: liveToken),
+              let plan = live.subscriptionType,
+              extractCredentials(from: restoringToken)?.subscriptionType != plan else { return nil }
+
+        let owners = otherBackups.filter { extractCredentials(from: $0.token)?.subscriptionType == plan }
+        guard owners.count == 1, let owner = owners.first else { return nil }
+
+        if let liveExpiry = live.expiresAt,
+           let ownerExpiry = extractCredentials(from: owner.token)?.expiresAt,
+           liveExpiry < ownerExpiry {
+            return nil
+        }
+        return owner.id
     }
 
     /// Capture the current Claude auth token + oauthAccount and associate with an account.
