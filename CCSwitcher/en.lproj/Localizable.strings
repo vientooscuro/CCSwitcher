@@ -94,6 +94,7 @@
 "Re-authenticate (fix stale token)" = "Re-authenticate (fix stale token)";
 "Remove account" = "Remove account";
 "Remove" = "Remove";
+"Save" = "Save";
 
 /* Usage Chart */
 "No Data" = "No Data";

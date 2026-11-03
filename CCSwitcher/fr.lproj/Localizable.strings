@@ -94,6 +94,7 @@
 "Re-authenticate (fix stale token)" = "Réauthentifier (réparer le jeton expiré)";
 "Remove account" = "Supprimer le compte";
 "Remove" = "Supprimer";
+"Save" = "Enregistrer";
 
 /* Usage Chart */
 "No Data" = "Aucune donnée";

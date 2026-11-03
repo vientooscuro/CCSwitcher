@@ -99,6 +99,7 @@ struct AccountSwitcherView: View {
                             .foregroundStyle(.green)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Save")
 
                     Button {
                         editingAccountId = nil
@@ -107,6 +108,7 @@ struct AccountSwitcherView: View {
                             .foregroundStyle(theme.textSecondary)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Cancel")
                 }
             } else {
                 HStack(spacing: 6) {
@@ -127,6 +129,7 @@ struct AccountSwitcherView: View {
                         }
                         .buttonStyle(.plain)
                         .help("Edit label")
+                        .accessibilityLabel("Edit label")
                     }
 
                     if row.isActive {
@@ -200,6 +203,7 @@ struct AccountSwitcherView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Use in Codex CLI")
+                .accessibilityLabel("Use in Codex CLI")
                 .disabled(!row.hasStoredCredentials || codex.isAuthenticating || codex.isLoading)
             }
 
@@ -213,6 +217,7 @@ struct AccountSwitcherView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Re-authenticate (fix stale token)")
+                .accessibilityLabel("Re-authenticate (fix stale token)")
             }
 
             if hub.surface.capabilities.managesAccounts {
@@ -225,6 +230,7 @@ struct AccountSwitcherView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Remove account")
+                .accessibilityLabel("Remove account")
             }
         }
     }

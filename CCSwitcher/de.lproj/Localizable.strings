@@ -94,6 +94,7 @@
 "Re-authenticate (fix stale token)" = "Erneut authentifizieren (abgelaufenes Token reparieren)";
 "Remove account" = "Konto entfernen";
 "Remove" = "Entfernen";
+"Save" = "Speichern";
 
 /* Usage Chart */
 "No Data" = "Keine Daten";

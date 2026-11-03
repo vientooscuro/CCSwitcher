@@ -229,6 +229,9 @@ struct CostDetailView: View {
                 .foregroundStyle(theme.textSecondary)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(hub.activeProvider == .codex
+            ? String(localized: "OpenAI rates", bundle: L10n.bundle)
+            : String(localized: "Claude rates", bundle: L10n.bundle))
         .popover(isPresented: $isPricingPopoverPresented, arrowEdge: .bottom) {
             PricingRatesPopover(provider: hub.activeProvider, modelSpend: aggregatedModelSpend)
                 .environment(\.providerTheme, theme)

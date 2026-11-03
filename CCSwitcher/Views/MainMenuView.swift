@@ -321,21 +321,25 @@ struct MainMenuView: View {
             // Tab labels on top
             HStack(spacing: 0) {
                 ForEach(Tab.allCases, id: \.self) { tab in
-                    VStack(spacing: 2) {
-                        Image(systemName: tab.iconName)
-                            .font(.system(size: 12))
-                        Text(tab.localizedTitle)
-                            .font(.caption2.weight(.semibold))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
-                    .foregroundStyle(selectedTab == tab ? theme.tabSelectedForeground : theme.textSecondary)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
+                    Button {
                         withAnimation(.easeInOut(duration: 0.15)) {
                             selectedTab = tab
                         }
+                    } label: {
+                        VStack(spacing: 2) {
+                            Image(systemName: tab.iconName)
+                                .font(.system(size: 12))
+                            Text(tab.localizedTitle)
+                                .font(.caption2.weight(.semibold))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                        .foregroundStyle(selectedTab == tab ? theme.tabSelectedForeground : theme.textSecondary)
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
+                    .focusable(false)
+                    .accessibilityAddTraits(selectedTab == tab ? .isSelected : [])
                 }
             }
         }
@@ -370,6 +374,7 @@ struct MainMenuView: View {
             .buttonStyle(.plain)
             .focusable(false)
             .help("Refresh")
+            .accessibilityLabel("Refresh")
 
             Button {
                 NSApp.activate(ignoringOtherApps: true)
@@ -384,6 +389,7 @@ struct MainMenuView: View {
             .buttonStyle(.plain)
             .focusable(false)
             .help("Settings")
+            .accessibilityLabel("Settings")
 
             Button {
                 NSApplication.shared.terminate(nil)
@@ -394,6 +400,7 @@ struct MainMenuView: View {
             .buttonStyle(.plain)
             .focusable(false)
             .help("Quit")
+            .accessibilityLabel("Quit")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
