@@ -129,6 +129,7 @@
 "Account already exists - credentials refreshed" = "Konto existiert bereits – Anmeldedaten aktualisiert";
 "Could not capture credentials" = "Anmeldedaten konnten nicht erfasst werden";
 "No stored credentials for %@. Use re-authenticate to fix." = "Keine gespeicherten Anmeldedaten für %@. Verwenden Sie Erneut authentifizieren zur Behebung.";
+"The stored credentials for %@ are empty. Use re-authenticate to sign in again." = "Die gespeicherten Anmeldedaten für %@ sind leer. Authentifizieren Sie sich erneut, um sich wieder anzumelden.";
 "Logged in as %@, but expected %@. Credentials not updated." = "Angemeldet als %1$@, aber %2$@ erwartet. Anmeldedaten nicht aktualisiert.";
 "Token expired. Switch to refresh." = "Token abgelaufen. Wechseln zum Aktualisieren.";
 "Token expired. Switch to this account to refresh." = "Token abgelaufen. Zu diesem Konto wechseln zum Aktualisieren.";

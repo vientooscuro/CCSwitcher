@@ -461,9 +461,14 @@ final class AppState: ObservableObject {
 
         log.info("[switchTo] ===== Switching from \(currentActive.email) to \(account.email) =====")
 
-        guard await keychain.getAccountBackup(forAccountId: account.id.uuidString) != nil else {
+        guard let targetBackup = await keychain.getAccountBackup(forAccountId: account.id.uuidString) else {
             log.error("[switchTo] ABORT: no backup for target account")
             errorMessage = String(localized: "No stored credentials for \(account.email). Use re-authenticate to fix.", bundle: L10n.bundle)
+            return
+        }
+        guard targetBackup.hasUsableCredentials else {
+            log.error("[switchTo] ABORT: backup for target account carries no OAuth secret")
+            errorMessage = String(localized: "The stored credentials for \(account.email) are empty. Use re-authenticate to sign in again.", bundle: L10n.bundle)
             return
         }
 

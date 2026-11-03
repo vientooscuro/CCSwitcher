@@ -129,6 +129,7 @@
 "Account already exists - credentials refreshed" = "アカウントは既に存在します - 認証情報を更新しました";
 "Could not capture credentials" = "認証情報を取得できませんでした";
 "No stored credentials for %@. Use re-authenticate to fix." = "%@ の保存済み認証情報がありません。再認証で修復してください。";
+"The stored credentials for %@ are empty. Use re-authenticate to sign in again." = "%@ の保存済み認証情報が空です。再認証して、もう一度サインインしてください。";
 "Logged in as %@, but expected %@. Credentials not updated." = "%1$@ としてログインしましたが、%2$@ が期待されていました。認証情報は更新されません。";
 "Token expired. Switch to refresh." = "トークンが期限切れです。切り替えて更新してください。";
 "Token expired. Switch to this account to refresh." = "トークンが期限切れです。このアカウントに切り替えて更新してください。";

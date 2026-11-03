@@ -577,6 +577,22 @@ final class ClaudeService: @unchecked Sendable {
         }
         let targetEmail = (targetBackup.oauthAccount["emailAddress"]?.value as? String) ?? "?"
         log.info("[switchAccount] Step 2: Target backup found (email=\(targetEmail))")
+        guard targetBackup.hasUsableCredentials else {
+            log.error("[switchAccount] Step 2: Target backup carries no OAuth secret")
+            throw ClaudeServiceError.backupCredentialsUnusable(email: targetAccount.email)
+        }
+
+        // Step 3 replaces the live credentials before Step 4 can judge them, so
+        // a rejected switch would otherwise sign out of the source account too.
+        func rollback(after reason: String) async {
+            guard let sourceToken, let sourceOAuth else {
+                log.error("[switchAccount] Rollback after \(reason) skipped: source credentials weren't captured")
+                return
+            }
+            let tokenRestored = await keychain.writeClaudeToken(sourceToken)
+            let oauthRestored = await keychain.writeOAuthAccount(sourceOAuth)
+            log.info("[switchAccount] Rolled back after \(reason): token=\(tokenRestored), oauthAccount=\(oauthRestored)")
+        }
 
         // Write both target values. A half-written switch (new token but old
         // oauthAccount, or vice-versa) leaves the keychain desynced, and the
@@ -596,13 +612,22 @@ final class ClaudeService: @unchecked Sendable {
         log.info("[switchAccount] Step 3: Both token and oauthAccount written")
 
         log.info("[switchAccount] Step 4: Verifying with `claude auth status`...")
-        let status = try await getAuthStatus()
+        let status: AuthStatus
+        do {
+            status = try await getAuthStatus()
+        } catch {
+            log.error("[switchAccount] Step 4: Could not read auth status: \(error.localizedDescription)")
+            await rollback(after: "the verification call failed")
+            throw error
+        }
         guard status.loggedIn else {
             log.error("[switchAccount] Step 4: Not logged in after switch!")
+            await rollback(after: "the CLI reported no login")
             throw ClaudeServiceError.switchVerificationFailed
         }
         if status.email != targetAccount.email {
             log.error("[switchAccount] Step 4: Logged in as \(status.email ?? "nil") instead of \(targetAccount.email)")
+            await rollback(after: "the CLI reported a different account")
             throw ClaudeServiceError.switchWrongAccount(expected: targetAccount.email, actual: status.email ?? "unknown")
         }
         log.info("[switchAccount] Step 4: Switch verified — logged in as \(status.email ?? "")")
@@ -654,6 +679,10 @@ final class ClaudeService: @unchecked Sendable {
         let keychain = KeychainService.shared
         guard let backup = await keychain.getAccountBackup(forAccountId: accountId) else {
             log.error("[restore] No known-good backup for \(email); cannot self-heal")
+            return false
+        }
+        guard backup.hasUsableCredentials else {
+            log.error("[restore] Backup for \(email) carries no OAuth secret; cannot self-heal")
             return false
         }
         await salvageForeignLiveToken(restoring: backup, accountId: accountId)
@@ -967,9 +996,12 @@ enum ClaudeServiceError: LocalizedError {
     case oauthAccountWriteFailed
     case switchVerificationFailed
     case switchWrongAccount(expected: String, actual: String)
+    case backupCredentialsUnusable(email: String)
 
     var errorDescription: String? {
         switch self {
+        case .backupCredentialsUnusable(let email):
+            return String(localized: "The stored credentials for \(email) are empty. Use re-authenticate to sign in again.", bundle: L10n.bundle)
         case .invalidOutput:
             return "Invalid output from Claude CLI"
         case .cliError(let msg):

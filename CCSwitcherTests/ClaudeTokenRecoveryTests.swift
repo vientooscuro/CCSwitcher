@@ -73,6 +73,30 @@ final class ClaudeTokenRecoveryTests: XCTestCase {
         }
     }
 
+    // MARK: - Usable credentials
+
+    private func backup(token: String) -> AccountBackup {
+        AccountBackup(token: token, oauthAccount: [:])
+    }
+
+    func testBackupWithBlankSecretsIsNotUsable() {
+        let blank = #"{"claudeAiOauth":{"accessToken":"","refreshToken":"","subscriptionType":"max"}}"#
+        XCTAssertFalse(backup(token: blank).hasUsableCredentials)
+    }
+
+    func testBackupWithARefreshTokenIsUsable() {
+        let onlyRefresh = #"{"claudeAiOauth":{"accessToken":"","refreshToken":"rt"}}"#
+        XCTAssertTrue(backup(token: onlyRefresh).hasUsableCredentials)
+    }
+
+    func testUnknownAuthShapeIsNotRejected() {
+        XCTAssertTrue(backup(token: #"{"apiKey":"k"}"#).hasUsableCredentials)
+    }
+
+    func testUnparsableBackupIsNotUsable() {
+        XCTAssertFalse(backup(token: "not json").hasUsableCredentials)
+    }
+
     // MARK: - Refresh error classification
 
     func testOnlyInvalidGrantMeansTheTokenIsDead() {

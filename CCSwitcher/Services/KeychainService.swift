@@ -67,6 +67,19 @@ private final class ProcessOutputReader: @unchecked Sendable {
 /// store immutable JSON-derived values (NSNumber/NSString/NSNull/Array/Dict
 /// of the same), so passing snapshots across actors is safe.
 struct AccountBackup: Codable, @unchecked Sendable {
+    /// A capture taken while the CLI holds no live login stores an intact
+    /// envelope around two empty secrets, which looks like a backup everywhere
+    /// else. An envelope with no `claudeAiOauth` block is an auth shape this
+    /// check doesn't model, so it isn't rejected.
+    var hasUsableCredentials: Bool {
+        guard let data = token.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        guard let oauth = root["claudeAiOauth"] as? [String: Any] else { return true }
+        let accessToken = oauth["accessToken"] as? String ?? ""
+        let refreshToken = oauth["refreshToken"] as? String ?? ""
+        return !accessToken.isEmpty || !refreshToken.isEmpty
+    }
+
     let token: String
     let oauthAccount: [String: AnyCodable]
 }
@@ -204,24 +217,59 @@ actor KeychainService {
     }
 
     func writeOAuthAccount(_ oauthAccount: [String: AnyCodable]) -> Bool {
-        guard let data = FileManager.default.contents(atPath: claudeJsonPath),
-              var json = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
-            log.error("[writeOAuthAccount] Failed to read \(claudeJsonPath)")
-            return false
-        }
+        // Write to the file the path points at: dotfile managers symlink
+        // ~/.claude.json, and replacing the link with a plain file would
+        // silently fork the user's config.
+        let path = URL(fileURLWithPath: claudeJsonPath).resolvingSymlinksInPath().path
+        let fm = FileManager.default
 
-        json["oauthAccount"] = Self.unwrap(oauthAccount)
+        // The CLI rewrites this file on its own (settings, project state). If
+        // it does so between our read and our write, start over from its
+        // version instead of writing a stale copy over it.
+        for attempt in 1...3 {
+            guard let attrs = try? fm.attributesOfItem(atPath: path),
+                  let data = fm.contents(atPath: path),
+                  var json = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
+                log.error("[writeOAuthAccount] Failed to read \(path)")
+                return false
+            }
+            let modifiedAt = attrs[.modificationDate] as? Date
 
-        do {
-            let newData = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
-            try newData.write(to: URL(fileURLWithPath: claudeJsonPath), options: .atomic)
+            json["oauthAccount"] = Self.unwrap(oauthAccount)
+
+            let newData: Data
+            do {
+                newData = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+            } catch {
+                log.error("[writeOAuthAccount] Failed: \(error.localizedDescription)")
+                return false
+            }
+
+            guard (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date == modifiedAt else {
+                log.warning("[writeOAuthAccount] File changed while preparing the write (attempt \(attempt)); re-reading")
+                continue
+            }
+
+            // Atomic replace that keeps the original permissions. The file
+            // holds MCP server settings and is 0600; `Data.write(.atomic)`
+            // would recreate it with default, world-readable permissions.
+            let permissions = (attrs[.posixPermissions] as? NSNumber) ?? NSNumber(value: 0o600)
+            let tmp = (path as NSString).deletingLastPathComponent + "/.claude.json.ccswitcher-\(UUID().uuidString)"
+            guard fm.createFile(atPath: tmp, contents: newData, attributes: [.posixPermissions: permissions]) else {
+                log.error("[writeOAuthAccount] Failed to write temporary file")
+                return false
+            }
+            guard rename(tmp, path) == 0 else {
+                log.error("[writeOAuthAccount] Failed to replace \(path): errno \(errno)")
+                unlink(tmp)
+                return false
+            }
             let email = (oauthAccount["emailAddress"]?.value as? String) ?? "?"
             log.info("[writeOAuthAccount] Written: email=\(email)")
             return true
-        } catch {
-            log.error("[writeOAuthAccount] Failed: \(error.localizedDescription)")
-            return false
         }
+        log.error("[writeOAuthAccount] Gave up: the file kept changing under us")
+        return false
     }
 
     // MARK: - Account Backup Operations (token + oauthAccount)

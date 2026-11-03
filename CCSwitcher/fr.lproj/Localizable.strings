@@ -129,6 +129,7 @@
 "Account already exists - credentials refreshed" = "Le compte existe déjà – identifiants actualisés";
 "Could not capture credentials" = "Impossible de récupérer les identifiants";
 "No stored credentials for %@. Use re-authenticate to fix." = "Aucun identifiant enregistré pour %@. Utilisez la réauthentification pour corriger.";
+"The stored credentials for %@ are empty. Use re-authenticate to sign in again." = "Les identifiants enregistrés pour %@ sont vides. Réauthentifiez-vous pour vous reconnecter.";
 "Logged in as %@, but expected %@. Credentials not updated." = "Connecté en tant que %1$@, mais %2$@ était attendu. Identifiants non mis à jour.";
 "Token expired. Switch to refresh." = "Jeton expiré. Basculez pour actualiser.";
 "Token expired. Switch to this account to refresh." = "Jeton expiré. Basculez vers ce compte pour actualiser.";

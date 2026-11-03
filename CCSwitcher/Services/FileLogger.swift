@@ -98,7 +98,10 @@ private final class FileLogWriter: @unchecked Sendable {
         queue.async { [weak self] in
             guard let self else { return }
             let ts = Formatters.isoFractional.string(from: Date())
-            let line = "[\(ts)] [\(level)] [\(category)] \(message)\n"
+            // The log outlives the session and gets attached to bug reports,
+            // so account emails are masked here, once, for every call site.
+            let masked = message.contains("@") ? message.obfuscatedEmail() : message
+            let line = "[\(ts)] [\(level)] [\(category)] \(masked)\n"
             guard let data = line.data(using: .utf8) else { return }
             self.pending.append(data)
 
