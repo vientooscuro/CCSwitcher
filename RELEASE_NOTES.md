@@ -1,4 +1,12 @@
-### Fewer keychain prompts
+### More reliable account tracking
+
+- A running Claude Code session rewriting its profile no longer changes which account CCSwitcher treats as active, or touches your live token. The owner of the token is now recognised by its fingerprint.
+- If the owner can't be determined, the account card asks you to switch once instead of showing another account's usage.
+- Saved accounts with empty credentials can't be switched to, and empty credentials never replace a saved account.
+- `~/.claude.json` is now written more safely: changes made by another program during a write are kept, and symlinks and file permissions are preserved.
+- Email addresses are masked in the app log.
+
+#### Included from v1.13.6
 
 - Fix keychain prompts that kept coming back: saved accounts are now read by CCSwitcher itself, so "Always Allow" sticks.
 - Prompts stay open long enough to type your password instead of closing after 5 seconds.
@@ -34,7 +42,15 @@ Costs remain estimates based on local usage and current model prices, not subscr
 
 ---
 
-### 减少钥匙串弹窗
+### 更可靠的账户跟踪
+
+- 正在运行的 Claude Code 会话重写其配置信息时，不再改变 CCSwitcher 认定的当前账户，也不会影响当前令牌。现在通过指纹识别令牌的所属账户。
+- 无法确定所属账户时，账户卡片会提示切换一次，而不是显示其他账户的用量。
+- 无法切换到凭据为空的已保存账户，空凭据也不会覆盖已保存的账户。
+- 更安全地写入 `~/.claude.json`：会保留其他程序在写入期间所做的更改，并保留符号链接和文件权限。
+- 应用日志中的电子邮件地址会被遮盖。
+
+#### 包含 v1.13.6 的更新
 
 - 修复钥匙串弹窗反复出现的问题：已保存的账户现在由 CCSwitcher 自行读取，“始终允许”可以持续生效。
 - 弹窗会保持足够长的时间以便输入密码，不再在 5 秒后关闭。
@@ -68,4 +84,4 @@ Costs remain estimates based on local usage and current model prices, not subscr
 
 费用仍是根据本地用量和当前模型价格得出的估算值，并非订阅账单。
 
-**Full Changelog**: https://github.com/vientooscuro/CCSwitcher/compare/v1.13.5...v1.13.6
+**Full Changelog**: https://github.com/vientooscuro/CCSwitcher/compare/v1.13.6...v1.13.7
