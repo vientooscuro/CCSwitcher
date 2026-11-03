@@ -1,4 +1,13 @@
-### More reliable account tracking
+### Popover improvements
+
+- Removing an account now asks for confirmation in the account row.
+- Error messages in the footer show up to three lines, with the full text in a tooltip.
+- A second click on the menu bar icon reliably closes the popover.
+- New keyboard shortcuts: ⌘1, ⌘2 and ⌘3 pick a tab, ⌘R refreshes and ⌘, opens Settings.
+- Icon-only buttons and controls now have VoiceOver labels.
+- CCSwitcher is now available in Spanish.
+
+#### Included from v1.13.7
 
 - A running Claude Code session rewriting its profile no longer changes which account CCSwitcher treats as active, or touches your live token. The owner of the token is now recognised by its fingerprint.
 - If the owner can't be determined, the account card asks you to switch once instead of showing another account's usage.
@@ -42,7 +51,16 @@ Costs remain estimates based on local usage and current model prices, not subscr
 
 ---
 
-### 更可靠的账户跟踪
+### 弹窗改进
+
+- 移除账户前，现在会在账户行内要求确认。
+- 底部的错误信息最多显示三行，完整内容可在工具提示中查看。
+- 再次点击菜单栏图标可以可靠地关闭弹窗。
+- 新增键盘快捷键：⌘1、⌘2 和 ⌘3 切换标签页，⌘R 刷新，⌘, 打开设置。
+- 仅含图标的按钮和控件现在提供 VoiceOver 标签。
+- CCSwitcher 现已支持西班牙语。
+
+#### 包含 v1.13.7 的更新
 
 - 正在运行的 Claude Code 会话重写其配置信息时，不再改变 CCSwitcher 认定的当前账户，也不会影响当前令牌。现在通过指纹识别令牌的所属账户。
 - 无法确定所属账户时，账户卡片会提示切换一次，而不是显示其他账户的用量。
@@ -84,4 +102,4 @@ Costs remain estimates based on local usage and current model prices, not subscr
 
 费用仍是根据本地用量和当前模型价格得出的估算值，并非订阅账单。
 
-**Full Changelog**: https://github.com/vientooscuro/CCSwitcher/compare/v1.13.6...v1.13.7
+**Full Changelog**: https://github.com/vientooscuro/CCSwitcher/compare/v1.13.7...v1.13.8
