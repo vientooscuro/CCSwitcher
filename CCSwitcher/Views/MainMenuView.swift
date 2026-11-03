@@ -355,7 +355,8 @@ struct MainMenuView: View {
                 Text(error)
                     .font(.caption2)
                     .foregroundStyle(theme.textSecondary)
-                    .lineLimit(1)
+                    .lineLimit(3)
+                    .help(error)
             }
 
             Spacer()
