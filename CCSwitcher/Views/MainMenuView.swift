@@ -98,6 +98,15 @@ struct MainMenuView: View {
             case .accounts: "person.2.fill"
             }
         }
+
+        /// ⌘1 / ⌘2 / ⌘3, in tab-bar order.
+        var shortcut: KeyEquivalent {
+            switch self {
+            case .usage: "1"
+            case .costs: "2"
+            case .accounts: "3"
+            }
+        }
     }
 
     var body: some View {
@@ -339,6 +348,7 @@ struct MainMenuView: View {
                     }
                     .buttonStyle(.plain)
                     .focusable(false)
+                    .keyboardShortcut(tab.shortcut, modifiers: .command)
                     .accessibilityAddTraits(selectedTab == tab ? .isSelected : [])
                 }
             }
@@ -373,6 +383,7 @@ struct MainMenuView: View {
             }
             .buttonStyle(.plain)
             .focusable(false)
+            .keyboardShortcut("r", modifiers: .command)
             .help("Refresh")
             .accessibilityLabel("Refresh")
 
@@ -388,6 +399,7 @@ struct MainMenuView: View {
             }
             .buttonStyle(.plain)
             .focusable(false)
+            .keyboardShortcut(",", modifiers: .command)
             .help("Settings")
             .accessibilityLabel("Settings")
 
