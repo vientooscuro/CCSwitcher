@@ -1,4 +1,11 @@
-### More reliable Claude account sessions
+### Fewer keychain prompts
+
+- Fix keychain prompts that kept coming back: saved accounts are now read by CCSwitcher itself, so "Always Allow" sticks.
+- Prompts stay open long enough to type your password instead of closing after 5 seconds.
+- After a denied prompt, CCSwitcher waits a minute before asking again.
+- A failed read of saved Codex accounts can no longer overwrite the others.
+
+#### Included from v1.13.5
 
 - Fix a session being lost when another program changed the active Claude account: the newest token is now kept for its owner instead of being overwritten.
 - A re-authenticated account recovers on the next refresh. Restarting the app is no longer needed to clear "Session expired and refresh failed".
@@ -27,7 +34,14 @@ Costs remain estimates based on local usage and current model prices, not subscr
 
 ---
 
-### 更可靠的 Claude 账户会话
+### 减少钥匙串弹窗
+
+- 修复钥匙串弹窗反复出现的问题：已保存的账户现在由 CCSwitcher 自行读取，“始终允许”可以持续生效。
+- 弹窗会保持足够长的时间以便输入密码，不再在 5 秒后关闭。
+- 拒绝弹窗后，CCSwitcher 会等待一分钟再询问。
+- 读取已保存的 Codex 账户失败时，不会再覆盖其他账户。
+
+#### 包含 v1.13.5 的更新
 
 - 修复其他程序更改当前 Claude 账户时会话丢失的问题：最新令牌现在会保留给其所属账户，不再被覆盖。
 - 重新登录的账户会在下次刷新时恢复，无需重启应用即可清除“Session expired and refresh failed”。
@@ -54,4 +68,4 @@ Costs remain estimates based on local usage and current model prices, not subscr
 
 费用仍是根据本地用量和当前模型价格得出的估算值，并非订阅账单。
 
-**Full Changelog**: https://github.com/vientooscuro/CCSwitcher/compare/v1.13.4...v1.13.5
+**Full Changelog**: https://github.com/vientooscuro/CCSwitcher/compare/v1.13.5...v1.13.6
