@@ -104,6 +104,64 @@ final class CodexDesktopProfilesTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: json).write(to: url)
     }
 
+    func testForcedRefreshResumesAfterDesktopSwitchFails() async throws {
+        let (_, second) = try signedInAccounts()
+        let switching = expectation(description: "desktop launch started")
+        let refreshStarted = expectation(description: "forced refresh started")
+        let refreshFinished = expectation(description: "forced refresh finished")
+        var releaseLaunch: CheckedContinuation<Void, Never>?
+        let state = CodexState(defaults: defaults, profiles: profiles, openDesktop: { _ in
+            switching.fulfill()
+            await withCheckedContinuation { releaseLaunch = $0 }
+            throw CocoaError(.fileNoSuchFile)
+        }, fetchUsage: { _, _ in self.usage(25) }, cachedUsage: { _ in nil })
+
+        let switchTask = Task { await state.switchTo(accountId: second.id) }
+        await fulfillment(of: [switching], timeout: 1)
+        let refreshTask = Task {
+            refreshStarted.fulfill()
+            await state.refresh(force: true)
+            refreshFinished.fulfill()
+        }
+        await fulfillment(of: [refreshStarted], timeout: 1)
+        await Task.yield()
+        XCTAssertTrue(state.isLoading)
+        releaseLaunch?.resume()
+        await fulfillment(of: [refreshFinished], timeout: 5)
+        await switchTask.value
+        refreshTask.cancel()
+        XCTAssertNotNil(state.lastRefresh)
+    }
+
+    func testForcedRefreshResumesAfterCLIActivationFails() async throws {
+        let (_, second) = try signedInAccounts()
+        let activating = expectation(description: "CLI activation started")
+        let refreshStarted = expectation(description: "forced refresh started")
+        let refreshFinished = expectation(description: "forced refresh finished")
+        var releaseBackup: CheckedContinuation<Void, Never>?
+        let state = CodexState(defaults: defaults, profiles: profiles, saveCLIBackup: { _, _ in
+            activating.fulfill()
+            await withCheckedContinuation { releaseBackup = $0 }
+            return false
+        }, fetchUsage: { _, _ in self.usage(25) }, cachedUsage: { _ in nil })
+
+        let activationTask = Task { await state.activateCLI(accountId: second.id) }
+        await fulfillment(of: [activating], timeout: 1)
+        let refreshTask = Task {
+            refreshStarted.fulfill()
+            await state.refresh(force: true)
+            refreshFinished.fulfill()
+        }
+        await fulfillment(of: [refreshStarted], timeout: 1)
+        await Task.yield()
+        XCTAssertTrue(state.isLoading)
+        releaseBackup?.resume()
+        await fulfillment(of: [refreshFinished], timeout: 5)
+        await activationTask.value
+        refreshTask.cancel()
+        XCTAssertNotNil(state.lastRefresh)
+    }
+
     func testRefreshReportsMissingCredentialsForInactiveAccount() async {
         let first = Account(email: "first@example.com", displayName: "First", provider: .codex, isActive: true)
         let second = Account(email: "second@example.com", displayName: "Second", provider: .codex)

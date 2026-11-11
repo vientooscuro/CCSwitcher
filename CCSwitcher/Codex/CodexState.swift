@@ -11,7 +11,14 @@ enum CodexStatisticsScope: String {
 @MainActor
 final class CodexState: ObservableObject, ProviderSurface {
 
-    @Published private(set) var isLoading = false
+    @Published private(set) var isLoading = false {
+        didSet {
+            guard oldValue, !isLoading else { return }
+            let waiters = accountRefreshWaiters
+            accountRefreshWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+        }
+    }
     @Published private(set) var isAuthenticating = false
     @Published private(set) var errorMessage: String?
     @Published private(set) var lastRefresh: Date?
@@ -31,6 +38,10 @@ final class CodexState: ObservableObject, ProviderSurface {
     }
     @Published private(set) var isStatisticsLoading = false
     private var statisticsGeneration = UUID()
+    private var lastStatisticsSnapshotAt: Date?
+    private var statisticsWaiters: [CheckedContinuation<Void, Never>] = []
+    private var accountRefreshWaiters: [CheckedContinuation<Void, Never>] = []
+    private static let statisticsMinInterval: TimeInterval = 60
     private(set) var hasStatisticsSnapshot = false
     var needsInitialStatisticsRefresh: Bool { !hasStatisticsSnapshot }
     /// Set when the live `auth.json` fingerprint matches no known account —
@@ -210,6 +221,9 @@ final class CodexState: ObservableObject, ProviderSurface {
     // MARK: - Refresh
 
     func refresh(force: Bool) async {
+        while force, isLoading {
+            await withCheckedContinuation { accountRefreshWaiters.append($0) }
+        }
         guard !isLoading else { return }
         reconcileDefaultProfile()
         refreshBackupPresence()
@@ -228,8 +242,8 @@ final class CodexState: ObservableObject, ProviderSurface {
             await refreshLimits(for: account, force: force)
         }
         isLoading = false
-        if force || needsInitialStatisticsRefresh {
-            await refreshCostAndActivity(notify: false)
+        if shouldRefreshStatistics(force: force) {
+            await refreshCostAndActivity(notify: false, waitForCurrent: force)
         }
 
         lastRefresh = Date()
@@ -293,10 +307,24 @@ final class CodexState: ObservableObject, ProviderSurface {
         statisticsGeneration = UUID()
         costSeries = .empty
         activitySummary = .empty
+        hasStatisticsSnapshot = false
+        lastStatisticsSnapshotAt = nil
         isStatisticsLoading = false
+        resumeStatisticsWaiters()
     }
 
-    func refreshCostAndActivity(notify: Bool = true) async {
+    func shouldRefreshStatistics(force: Bool, now: Date = Date()) -> Bool {
+        guard !force, hasStatisticsSnapshot, let lastStatisticsSnapshotAt else { return true }
+        let elapsed = now.timeIntervalSince(lastStatisticsSnapshotAt)
+        return !Calendar.current.isDate(lastStatisticsSnapshotAt, inSameDayAs: now)
+            || elapsed < 0 || elapsed >= Self.statisticsMinInterval
+    }
+
+    func refreshCostAndActivity(notify: Bool = true, waitForCurrent: Bool = true) async {
+        while waitForCurrent, isStatisticsLoading {
+            await withCheckedContinuation { statisticsWaiters.append($0) }
+        }
+        let statisticsStartedAt = Date()
         guard let generation = beginStatisticsRefreshIfIdle() else { return }
         defer {
             finishStatisticsRefresh(generation: generation)
@@ -329,7 +357,7 @@ final class CodexState: ObservableObject, ProviderSurface {
         guard statisticsGeneration == generation, statisticsScope == scope, selectedProfile == profile else { return }
         costSeries = cost
         activitySummary = activity
-        hasStatisticsSnapshot = true
+        finishStatisticsRefresh(generation: generation, snapshotAt: statisticsStartedAt)
         if notify { didRefresh?() }
         log.info("[refresh] today=$\(String(format: "%.2f", costSeries.todayCost)) turns=\(activitySummary.turns)")
     }
@@ -342,9 +370,20 @@ final class CodexState: ObservableObject, ProviderSurface {
         return generation
     }
 
-    func finishStatisticsRefresh(generation: UUID) {
+    func finishStatisticsRefresh(generation: UUID, snapshotAt: Date? = nil) {
         guard statisticsGeneration == generation else { return }
+        if let snapshotAt {
+            hasStatisticsSnapshot = true
+            lastStatisticsSnapshotAt = snapshotAt
+        }
         isStatisticsLoading = false
+        resumeStatisticsWaiters()
+    }
+
+    private func resumeStatisticsWaiters() {
+        let waiters = statisticsWaiters
+        statisticsWaiters.removeAll()
+        waiters.forEach { $0.resume() }
     }
 
     private func hydrateFromWidgetCache() {

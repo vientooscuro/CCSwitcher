@@ -183,30 +183,39 @@ struct CostDetailView: View {
         let isToday = day.date == todayString()
         let barRatio = maxCost > 0 ? day.cost / maxCost : 0
 
-        return HStack(spacing: 8) {
-            Text(shortDate(day.date))
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(isToday ? theme.accent : .secondary)
-                .frame(width: 40, alignment: .leading)
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                Text(shortDate(day.date))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(isToday ? theme.accent : .secondary)
+                    .frame(width: 40, alignment: .leading)
 
-            Text(formatCost(day.cost))
-                .font(.caption2.weight(.medium).monospacedDigit())
-                .foregroundStyle(isToday ? theme.accent : .primary)
-                .frame(width: 56, alignment: .trailing)
+                Text(formatCost(day.cost))
+                    .font(.caption2.weight(.medium).monospacedDigit())
+                    .foregroundStyle(isToday ? theme.accent : .primary)
+                    .frame(width: 56, alignment: .trailing)
 
-            GeometryReader { geo in
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(isToday ? theme.accent : Color.blue.opacity(0.6))
-                    .frame(width: max(2, geo.size.width * barRatio), height: 8)
+                GeometryReader { geo in
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(isToday ? theme.accent : Color.blue.opacity(0.6))
+                        .frame(width: max(2, geo.size.width * barRatio), height: 8)
+                }
+                .frame(height: 8)
+
+                // Compact model breakdown
+                Text(day.modelBreakdown.keys.sorted().joined(separator: ", "))
+                    .font(.system(size: 8))
+                    .foregroundStyle(theme.textSecondary)
+                    .frame(width: 50, alignment: .trailing)
+                    .lineLimit(1)
             }
-            .frame(height: 8)
-
-            // Compact model breakdown
-            Text(day.modelBreakdown.keys.sorted().joined(separator: ", "))
-                .font(.system(size: 8))
-                .foregroundStyle(theme.textSecondary)
-                .frame(width: 50, alignment: .trailing)
-                .lineLimit(1)
+            HStack {
+                Text("\(day.totalTokens.formatted(.number.locale(locale))) tokens")
+                Spacer()
+                Text("\(day.cacheReadTokens.formatted(.number.locale(locale))) cached")
+            }
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(theme.textSecondary)
         }
         .padding(.vertical, 4)
         .padding(.horizontal, 8)
@@ -276,7 +285,11 @@ struct CostDetailView: View {
                 }
                 Text(hub.activeProvider == .codex
                      ? "Estimated API-equivalent cost from local Codex session logs, including archives. This is not your subscription charge. Historical usage before profile isolation cannot be reliably split between accounts."
-                     : "Cost is computed from your local Claude Code session logs (jsonl files) under ~/.claude/projects/.")
+                     : "Estimated API-equivalent cost from local Claude Code session logs. This is not your subscription charge.")
+                    .font(.caption2)
+                    .foregroundStyle(theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Token totals include input, output, cache reads and cache writes. Days use the local time zone.")
                     .font(.caption2)
                     .foregroundStyle(theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -309,7 +322,9 @@ struct CostDetailView: View {
     }
 
     private func formatTokenCount(_ count: Int) -> String {
-        if count >= 1_000_000 {
+        if count >= 1_000_000_000 {
+            return String(format: "%.1fB", Double(count) / 1_000_000_000)
+        } else if count >= 1_000_000 {
             return String(format: "%.1fM", Double(count) / 1_000_000)
         } else if count >= 1_000 {
             return String(format: "%.1fK", Double(count) / 1_000)

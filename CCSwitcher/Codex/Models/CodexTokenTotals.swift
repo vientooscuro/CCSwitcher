@@ -96,8 +96,9 @@ struct CodexUsageEvent: Codable, Sendable {
     var delta: CodexTokenTotals
     var requestScope: String?
     var serviceTier: OpenAIServiceTier
+    var responseID: String?
 
-    init(timestamp: Double, day: String, model: String, cumulative: CodexTokenTotals, delta: CodexTokenTotals, requestScope: String? = nil, serviceTier: OpenAIServiceTier = .unknown) {
+    init(timestamp: Double, day: String, model: String, cumulative: CodexTokenTotals, delta: CodexTokenTotals, requestScope: String? = nil, serviceTier: OpenAIServiceTier = .unknown, responseID: String? = nil) {
         self.timestamp = timestamp
         self.day = day
         self.model = model
@@ -105,6 +106,7 @@ struct CodexUsageEvent: Codable, Sendable {
         self.delta = delta
         self.requestScope = requestScope
         self.serviceTier = serviceTier
+        self.responseID = responseID
     }
 
     // Millions of replayed events make repeated JSON keys materially expensive.
@@ -117,6 +119,7 @@ struct CodexUsageEvent: Codable, Sendable {
         delta = try values.decode(CodexTokenTotals.self)
         requestScope = values.isAtEnd ? nil : try values.decodeIfPresent(String.self)
         serviceTier = values.isAtEnd ? .unknown : try values.decode(OpenAIServiceTier.self)
+        responseID = values.isAtEnd ? nil : try values.decodeIfPresent(String.self)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -128,6 +131,7 @@ struct CodexUsageEvent: Codable, Sendable {
         try values.encode(delta)
         try values.encode(requestScope)
         try values.encode(serviceTier)
+        if let responseID { try values.encode(responseID) }
     }
 }
 

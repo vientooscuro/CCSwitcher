@@ -2,6 +2,89 @@ import XCTest
 @testable import CCSwitcher
 
 final class CodexRolloutParserTests: XCTestCase {
+    func testConfirmedFirstRequestIsCountedWhenCumulativeIncludesEarlierUsage() throws {
+        let text = """
+        {"type":"session_meta","payload":{"id":"session"}}
+        {"type":"turn_context","payload":{"turn_id":"turn","model":"gpt-5.4"}}
+        {"timestamp":"2026-11-10T10:00:00Z","type":"token_usage_record","payload":{"thread_id":"thread","turn_id":"turn","session_id":"session","response_id":"resp_1","usage":{"input_tokens":1000,"cached_input_tokens":800,"cache_write_input_tokens":0,"output_tokens":50,"reasoning_output_tokens":10,"total_tokens":1050}}}
+        {"type":"event_msg","payload":{"type":"item_completed"}}
+        {"type":"response_item","payload":{"type":"custom_tool_call_output"}}
+        {"timestamp":"2026-11-10T10:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":9000,"cached_input_tokens":7000,"output_tokens":500},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":800,"output_tokens":50}}}}
+        """
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        let aggregate = try XCTUnwrap(CodexRolloutParser.parse(contentsOf: url.path, relativePath: "confirmed.jsonl", mtime: 1))
+        XCTAssertEqual(aggregate.tokens["2026-11-10"]?["gpt-5.4"]?.inputTokens, 1000)
+        XCTAssertEqual(aggregate.tokens["2026-11-10"]?["gpt-5.4"]?.cachedInputTokens, 800)
+        XCTAssertEqual(aggregate.tokens["2026-11-10"]?["gpt-5.4"]?.outputTokens, 50)
+        XCTAssertEqual(aggregate.usageEvents.first?.responseID, "resp_1")
+    }
+
+    func testMismatchedRecordDoesNotConfirmInitialSnapshot() throws {
+        let text = """
+        {"type":"turn_context","payload":{"model":"gpt-5.4"}}
+        {"type":"token_usage_record","payload":{"response_id":"resp_1","usage":{"input_tokens":999,"output_tokens":50}}}
+        {"timestamp":"2026-11-10T10:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":9000,"output_tokens":500},"last_token_usage":{"input_tokens":1000,"output_tokens":50}}}}
+        """
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        let aggregate = try XCTUnwrap(CodexRolloutParser.parse(contentsOf: url.path, relativePath: "partial.jsonl", mtime: 1))
+        XCTAssertTrue(aggregate.usageEvents.isEmpty)
+        XCTAssertTrue(aggregate.tokens.isEmpty)
+    }
+
+    func testEqualCountersWithDistinctResponseIDsAreSeparateRequests() throws {
+        let text = """
+        {"type":"turn_context","payload":{"model":"gpt-5.4"}}
+        {"type":"token_usage_record","payload":{"response_id":"resp_1","usage":{"input_tokens":1000,"output_tokens":50}}}
+        {"timestamp":"2026-11-10T10:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":9000,"output_tokens":500},"last_token_usage":{"input_tokens":1000,"output_tokens":50}}}}
+        {"type":"token_usage_record","payload":{"response_id":"resp_2","usage":{"input_tokens":1000,"output_tokens":50}}}
+        {"timestamp":"2026-11-10T10:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":9000,"output_tokens":500},"last_token_usage":{"input_tokens":1000,"output_tokens":50}}}}
+        {"type":"token_usage_record","payload":{"response_id":"resp_2","usage":{"input_tokens":1000,"output_tokens":50}}}
+        {"timestamp":"2026-11-10T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":9000,"output_tokens":500},"last_token_usage":{"input_tokens":1000,"output_tokens":50}}}}
+        """
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        let aggregate = try XCTUnwrap(CodexRolloutParser.parse(contentsOf: url.path, relativePath: "same-counters.jsonl", mtime: 1))
+        XCTAssertEqual(aggregate.tokens["2026-11-10"]?["gpt-5.4"]?.inputTokens, 2000)
+        XCTAssertEqual(CodexSessionCache.mergedTokensByDayAndModel(from: [aggregate])["2026-11-10"]?["gpt-5.4"]?.inputTokens, 2000)
+    }
+
+    func testInterveningTurnContextInvalidatesPendingConfirmation() throws {
+        let text = """
+        {"type":"token_usage_record","payload":{"response_id":"resp_1","usage":{"input_tokens":1000,"output_tokens":50}}}
+        {"type":"turn_context","payload":{"turn_id":"other-turn","model":"gpt-5.4"}}
+        {"timestamp":"2026-11-10T10:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":9000,"output_tokens":500},"last_token_usage":{"input_tokens":1000,"output_tokens":50}}}}
+        """
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        let aggregate = try XCTUnwrap(CodexRolloutParser.parse(contentsOf: url.path, relativePath: "intervening.jsonl", mtime: 1))
+        XCTAssertTrue(aggregate.usageEvents.isEmpty)
+    }
+
+    func testDuplicateResponseKeepsLatestCounterForFollowingLegacyEvent() throws {
+        let text = """
+        {"type":"turn_context","payload":{"model":"gpt-5.4"}}
+        {"type":"token_usage_record","payload":{"response_id":"resp_1","usage":{"input_tokens":100,"output_tokens":10}}}
+        {"timestamp":"2026-11-10T10:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"output_tokens":100},"last_token_usage":{"input_tokens":100,"output_tokens":10}}}}
+        {"type":"token_usage_record","payload":{"response_id":"resp_1","usage":{"input_tokens":100,"output_tokens":10}}}
+        {"timestamp":"2026-11-10T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200,"output_tokens":120},"last_token_usage":{"input_tokens":100,"output_tokens":10}}}}
+        {"type":"token_usage_record","payload":{"response_id":"resp_1","usage":{"input_tokens":100,"output_tokens":10}}}
+        {"timestamp":"2026-11-10T10:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"output_tokens":100},"last_token_usage":{"input_tokens":100,"output_tokens":10}}}}
+        {"timestamp":"2026-11-10T10:00:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1300,"output_tokens":130}}}}
+        """
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        let aggregate = try XCTUnwrap(CodexRolloutParser.parse(contentsOf: url.path, relativePath: "duplicate.jsonl", mtime: 1))
+        XCTAssertEqual(aggregate.tokens["2026-11-10"]?["gpt-5.4"]?.inputTokens, 200)
+        XCTAssertEqual(aggregate.tokens["2026-11-10"]?["gpt-5.4"]?.outputTokens, 20)
+    }
+
     func testTokenEventPreservesRequestServiceTier() throws {
         let text = """
         {"type":"session_meta","payload":{"id":"session"}}

@@ -57,6 +57,9 @@ final class AppState: ObservableObject {
     /// shouldn't trigger a synchronous JSONEncoder + UserDefaults write.
     private var pendingSaveTask: Task<Void, Never>?
     private var statisticsGeneration = UUID()
+    private var lastStatisticsSnapshotAt: Date?
+    private var statisticsWaiters: [CheckedContinuation<Void, Never>] = []
+    private static let statisticsMinInterval: TimeInterval = 60
     private var accountRefreshGeneration = UUID()
 
     /// Set by `ProviderHub` at init. `refresh()` and `updateAccountLabel`
@@ -178,7 +181,12 @@ final class AppState: ObservableObject {
         recentActivity = statsParser.getRecentActivity(days: 7)
         activeSessions = statsParser.getActiveSessions()
 
-        guard let statisticsGeneration = beginStatisticsRefresh(force: force) else {
+        while force, isStatisticsLoading {
+            await waitForStatisticsRefresh()
+            guard self.accountRefreshGeneration == accountRefreshGeneration else { return }
+        }
+        let statisticsStartedAt = Date()
+        guard let statisticsGeneration = beginStatisticsRefresh(force: force, now: statisticsStartedAt) else {
             didRefresh?()
             return
         }
@@ -193,20 +201,24 @@ final class AppState: ObservableObject {
         guard self.statisticsGeneration == statisticsGeneration else { return }
         costSummary = cost
         activityStats = activity
-        hasStatisticsSnapshot = true
-        finishStatisticsRefresh(generation: statisticsGeneration)
+        finishStatisticsRefresh(generation: statisticsGeneration, snapshotAt: statisticsStartedAt)
 
         log.info("[refresh] Usage: weekly=\(self.usageSummary.weeklyMessages) msgs, \(self.activeSessions.count) active sessions, today=$\(String(format: "%.2f", cost.todayCost)) turns=\(activity.conversationTurns)")
 
         didRefresh?()
     }
 
-    func beginStatisticsRefresh(force: Bool) -> UUID? {
+    func beginStatisticsRefresh(force: Bool, now: Date = Date()) -> UUID? {
         isLoading = false
         // A widget snapshot only contains today's headline, never the daily
         // series. Rebuild the series once after launch so Costs cannot present
         // a cached total as though it were complete history.
-        guard (force || !hasStatisticsSnapshot), !isStatisticsLoading else { return nil }
+        let isFresh = lastStatisticsSnapshotAt.map {
+            Calendar.current.isDate($0, inSameDayAs: now)
+                && now.timeIntervalSince($0) >= 0
+                && now.timeIntervalSince($0) < Self.statisticsMinInterval
+        } ?? false
+        guard (force || !hasStatisticsSnapshot || !isFresh), !isStatisticsLoading else { return nil }
         let generation = UUID()
         statisticsGeneration = generation
         isStatisticsLoading = true
@@ -226,9 +238,21 @@ final class AppState: ObservableObject {
         isLoading = false
     }
 
-    func finishStatisticsRefresh(generation: UUID) {
+    private func waitForStatisticsRefresh() async {
+        guard isStatisticsLoading else { return }
+        await withCheckedContinuation { statisticsWaiters.append($0) }
+    }
+
+    func finishStatisticsRefresh(generation: UUID, snapshotAt: Date? = nil) {
         guard statisticsGeneration == generation else { return }
+        if let snapshotAt {
+            hasStatisticsSnapshot = true
+            lastStatisticsSnapshotAt = snapshotAt
+        }
         isStatisticsLoading = false
+        let waiters = statisticsWaiters
+        statisticsWaiters.removeAll()
+        waiters.forEach { $0.resume() }
     }
 
     func startAutoRefresh(interval: TimeInterval = 300) {

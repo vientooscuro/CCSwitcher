@@ -32,6 +32,8 @@ enum CodexRolloutParser {
         var previous: CodexTokenTotals?
         var previousTimestamp: Double?
         var requestScope: String?
+        var pendingRecord: (responseID: String, usage: CodexTokenTotals)?
+        var seenResponses: Set<String> = []
         var pendingUsage: [CodexUsageEvent] = []
         var timestampsByDate: [String: [Date]] = [:]
         var turnTimestampsByDay: [String: [Double]] = [:]
@@ -46,6 +48,18 @@ enum CodexRolloutParser {
 
             let payload = event["payload"] as? [String: Any]
             let timestamp = (event["timestamp"] as? String).flatMap(parseTimestamp)
+            let eventType = event["type"] as? String
+            let payloadType = payload?["type"] as? String
+            if pendingRecord != nil {
+                switch (eventType, payloadType) {
+                case ("token_usage_record", _), ("event_msg", "token_count"),
+                     ("event_msg", "item_completed"), ("response_item", "custom_tool_call_output"),
+                     ("response_item", "function_call_output"):
+                    break
+                default:
+                    pendingRecord = nil
+                }
+            }
 
             if let timestamp {
                 let day = Formatters.isoDay.string(from: timestamp)
@@ -58,6 +72,7 @@ enum CodexRolloutParser {
             case "session_meta":
                 previous = nil
                 previousTimestamp = nil
+                pendingRecord = nil
                 currentModel = nil
                 requestScope = (payload?["id"] as? String) ?? (payload?["session_id"] as? String)
                 if let sessionId = (payload?["session_id"] as? String) ?? (payload?["id"] as? String) {
@@ -86,6 +101,14 @@ enum CodexRolloutParser {
                     }
                 }
 
+            case "token_usage_record":
+                if let payload, let responseID = payload["response_id"] as? String, !responseID.isEmpty,
+                   let usage = payload["usage"] as? [String: Any] {
+                    pendingRecord = (responseID, totals(fromTotalUsage: usage))
+                } else {
+                    pendingRecord = nil
+                }
+
             case "event_msg":
                 guard let payload else { break }
                 switch payload["type"] as? String {
@@ -105,22 +128,36 @@ enum CodexRolloutParser {
                     // `info` is null on many events; those carry limits only.
                     guard let info = payload["info"] as? [String: Any],
                           let raw = info["total_token_usage"] as? [String: Any],
-                          let timestamp else { break }
+                          let timestamp else {
+                        pendingRecord = nil
+                        break
+                    }
                     let cumulative = totals(fromTotalUsage: raw)
+                    let lastUsage = (info["last_token_usage"] as? [String: Any]).map(totals(fromTotalUsage:))
+                    let responseID = pendingRecord.flatMap { $0.usage == lastUsage ? $0.responseID : nil }
+                    pendingRecord = nil
                     let serviceTier = OpenAIServiceTier(rawValueOrUnknown:
                         (info["service_tier"] as? String) ?? (payload["service_tier"] as? String)
                     )
                     let day = Formatters.isoDay.string(from: timestamp)
+                    if cumulative == previous, previousTimestamp == timestamp.timeIntervalSince1970, responseID == nil { break }
+                    if let responseID, !seenResponses.insert(responseID).inserted {
+                        if previous == nil || previous.flatMap({ difference(cumulative, minus: $0) }) != nil {
+                            previous = cumulative
+                            previousTimestamp = timestamp.timeIntervalSince1970
+                        }
+                        break
+                    }
                     defer {
                         previous = cumulative
                         previousTimestamp = timestamp.timeIntervalSince1970
                     }
-                    if cumulative == previous, previousTimestamp == timestamp.timeIntervalSince1970 { break }
-                    // A first/reset event can carry real usage. A repeated
-                    // cumulative snapshot is still zero, even when last usage repeats.
-                    let lastUsage = (info["last_token_usage"] as? [String: Any]).map(totals(fromTotalUsage:))
+                    // A response ID proves this request even when the cumulative
+                    // counter contains earlier usage or matches a prior snapshot.
                     let delta: CodexTokenTotals?
-                    if cumulative == previous {
+                    if responseID != nil {
+                        delta = lastUsage
+                    } else if cumulative == previous {
                         // Keep proof of a repeated snapshot: another partial
                         // replay may begin here and mistake it for a first request.
                         delta = CodexTokenTotals()
@@ -133,7 +170,7 @@ enum CodexRolloutParser {
                     let usage = CodexUsageEvent(
                         timestamp: timestamp.timeIntervalSince1970, day: day,
                         model: currentModel ?? "unknown", cumulative: cumulative, delta: delta,
-                        requestScope: requestScope, serviceTier: serviceTier
+                        requestScope: requestScope, serviceTier: serviceTier, responseID: responseID
                     )
                     if currentModel != nil {
                         aggregate.usageEvents.append(usage)

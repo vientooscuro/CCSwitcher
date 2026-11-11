@@ -100,7 +100,9 @@ struct UsageDashboardView: View {
                 Spacer()
             }
 
-            StatWithTooltip(tooltip: Self.costDisclaimer) {
+            StatWithTooltip(tooltip: hub.activeProvider == .codex
+                ? "Estimated API-equivalent cost of your Codex usage, for reference only."
+                : "Estimated API-equivalent cost of your Claude Code usage, for reference only.") {
                 Text(Formatters.currency(cost))
                     .font(.title.weight(.semibold).monospacedDigit())
                     .foregroundStyle(.green)
@@ -109,8 +111,6 @@ struct UsageDashboardView: View {
         .cardStyle(fill: theme.cardFill, border: theme.cardBorder)
         .sectionPadding()
     }
-
-    private static let costDisclaimer: LocalizedStringKey = "Estimated API-equivalent cost of your Claude Code usage, for reference only."
 
     // MARK: - Today Activity Card
 

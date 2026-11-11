@@ -45,7 +45,8 @@ actor CodexSessionCache {
     /// v6: request deltas and timestamp identities replace magnitude-sorted
     /// cumulative counters, which merged independent agent usage incorrectly.
     /// v7: stable turn identities deduplicate fork replay with rewritten timestamps.
-    private static let currentVersion = 7
+    /// v8: first-request confirmations and response identities affect usage.
+    private static let currentVersion = 8
 
     private var files: [String: CodexRolloutAggregate] = [:]
     private var loaded = false
@@ -240,12 +241,13 @@ actor CodexSessionCache {
             let scope: String?
             let timestamp: Double
             let cumulative: CodexTokenTotals
+            let responseID: String?
         }
         var events: [EventKey: CodexUsageEvent] = [:]
         for (index, aggregate) in aggregates.enumerated() {
             for event in aggregate.usageEvents {
                 let key = EventKey(session: aggregate.sessionId ?? "unkeyed-\(index)", scope: event.requestScope,
-                                   timestamp: event.timestamp, cumulative: event.cumulative)
+                                   timestamp: event.timestamp, cumulative: event.cumulative, responseID: event.responseID)
                 // Replayed history keeps its timestamp and counters. A file
                 // beginning mid-history may only know the last request's delta.
                 if var existing = events[key] {
@@ -273,12 +275,26 @@ actor CodexSessionCache {
             let cumulative: CodexTokenTotals
             let delta: CodexTokenTotals
         }
-        var requests: [RequestKey: CodexUsageEvent] = [:]
+        func legacyKey(_ key: EventKey, _ event: CodexUsageEvent) -> RequestKey {
+            RequestKey(session: key.session, scope: key.scope, cumulative: event.cumulative,
+                       delta: event.delta)
+        }
+        let confirmedSignatures = Set(events.compactMap { key, event in
+            event.responseID == nil ? nil : legacyKey(key, event)
+        })
+        var legacyRequests: [RequestKey: CodexUsageEvent] = [:]
+        var confirmedRequests: [String: CodexUsageEvent] = [:]
         for (key, event) in events {
             guard event.delta.totalBillableTokens > 0 else { continue }
-            let requestKey = RequestKey(session: key.session, scope: key.scope, cumulative: event.cumulative, delta: event.delta)
-            if var existing = requests[requestKey] {
-                // Fork replay rewrites timestamps but preserves turn IDs and counters.
+            let requestKey = legacyKey(key, event)
+            if event.responseID == nil, confirmedSignatures.contains(requestKey) { continue }
+            let existingEvent = if let responseID = event.responseID {
+                confirmedRequests[responseID]
+            } else {
+                legacyRequests[requestKey]
+            }
+            if var existing = existingEvent {
+                // Replays may rewrite timestamps; preserve the earliest attribution.
                 if event.timestamp < existing.timestamp {
                     existing.timestamp = event.timestamp
                     existing.day = event.day
@@ -289,12 +305,20 @@ actor CodexSessionCache {
                 if existing.serviceTier == .unknown, event.serviceTier != .unknown {
                     existing.serviceTier = event.serviceTier
                 }
-                requests[requestKey] = existing
+                if let responseID = event.responseID {
+                    confirmedRequests[responseID] = existing
+                } else {
+                    legacyRequests[requestKey] = existing
+                }
             } else {
-                requests[requestKey] = event
+                if let responseID = event.responseID {
+                    confirmedRequests[responseID] = event
+                } else {
+                    legacyRequests[requestKey] = event
+                }
             }
         }
-        return Array(requests.values)
+        return Array(confirmedRequests.values) + Array(legacyRequests.values)
     }
 
     /// Legacy activity heuristic: collapses replays that preserve timestamps

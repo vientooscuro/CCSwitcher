@@ -5,15 +5,21 @@ private let log = FileLog("Pricing")
 /// Tiered model pricing in dollars-per-token, matching the shape of the
 /// LiteLLM `model_prices_and_context_window.json` entries we care about.
 ///
-/// 200k tier: Anthropic charges roughly double per token once a request's
-/// input exceeds 200,000 tokens. LiteLLM encodes this as the
-/// `*_above_200k_tokens` family of fields.
+/// LiteLLM provides 100k and 200k long-context pricing fields for Claude.
 ///
 /// Fast multiplier: lives under `provider_specific_entry.fast` for the
 /// models that support it. Applied to the entire base cost when
 /// `usage.speed == "fast"`. Most rows in real data have `speed == "standard"`,
 /// so the multiplier is rarely exercised — but it's a real billing line.
 struct LiteLLMModelPricing: Sendable {
+    struct AnthropicLongContextRates: Sendable {
+        let input: Double?
+        let output: Double?
+        let cacheCreate: Double?
+        let cacheCreate1h: Double?
+        let cacheRead: Double?
+    }
+
     struct OpenAIRates: Sendable {
         let input: Double
         let output: Double
@@ -42,8 +48,19 @@ struct LiteLLMModelPricing: Sendable {
     let cacheReadAbove200k: Double?
     let fastMultiplier: Double?
     var openAI: OpenAIPricing? = nil
+    var anthropicAbove100k: AnthropicLongContextRates? = nil
 
     func cost(input: Int, output: Int, cacheCreate: Int, cacheCreate1h: Int, cacheRead: Int, isFast: Bool) -> Double {
+        if let rates = anthropicAbove100k, input + cacheCreate + cacheRead > 100_000 {
+            let oneHour = cacheCreate1hPerToken == nil ? 0 : min(max(cacheCreate1h, 0), cacheCreate)
+            let longOneHourRate = rates.cacheCreate1h ?? rates.input.map { $0 * 2 } ?? cacheCreate1hPerToken ?? cacheCreatePerToken
+            let base = Double(input) * (rates.input ?? inputPerToken)
+                + Double(output) * (rates.output ?? outputPerToken)
+                + Double(cacheCreate - oneHour) * (rates.cacheCreate ?? cacheCreatePerToken)
+                + Double(oneHour) * longOneHourRate
+                + Double(cacheRead) * (rates.cacheRead ?? cacheReadPerToken)
+            return base * (isFast ? (fastMultiplier ?? 1.0) : 1.0)
+        }
         // Cache-creation cost: 1-hour-TTL writes (cacheCreate1h) bill at the higher
         // 1h rate; the remainder stays at the 5-minute rate, which carries the 200k
         // long-context tier when the model defines one. No first-party Claude Code
@@ -133,11 +150,16 @@ actor PricingService {
         let models: [String: LiteLLMEntry]
     }
 
-    private struct LiteLLMEntry: Decodable {
+    struct LiteLLMEntry: Decodable {
         let input_cost_per_token: Double?
         let output_cost_per_token: Double?
         let cache_creation_input_token_cost: Double?
         let cache_read_input_token_cost: Double?
+        let input_cost_per_token_above_100k_tokens: Double?
+        let output_cost_per_token_above_100k_tokens: Double?
+        let cache_creation_input_token_cost_above_100k_tokens: Double?
+        let cache_creation_input_token_cost_above_1hr_above_100k_tokens: Double?
+        let cache_read_input_token_cost_above_100k_tokens: Double?
         let input_cost_per_token_above_200k_tokens: Double?
         let output_cost_per_token_above_200k_tokens: Double?
         let cache_creation_input_token_cost_above_200k_tokens: Double?
@@ -193,6 +215,11 @@ actor PricingService {
                 flex: rates(input_cost_per_token_flex, output_cost_per_token_flex, cache_creation_input_token_cost_flex, cache_read_input_token_cost_flex),
                 flexLongContext: rates(input_cost_per_token_above_272k_tokens_flex, output_cost_per_token_above_272k_tokens_flex, cache_creation_input_token_cost_above_272k_tokens_flex, cache_read_input_token_cost_above_272k_tokens_flex)
             )
+            let hasAbove100k = input_cost_per_token_above_100k_tokens != nil
+                || output_cost_per_token_above_100k_tokens != nil
+                || cache_creation_input_token_cost_above_100k_tokens != nil
+                || cache_creation_input_token_cost_above_1hr_above_100k_tokens != nil
+                || cache_read_input_token_cost_above_100k_tokens != nil
             return LiteLLMModelPricing(
                 inputPerToken: input, outputPerToken: output,
                 cacheCreatePerToken: cw, cacheCreate1hPerToken: cw1h, cacheReadPerToken: cr,
@@ -201,7 +228,14 @@ actor PricingService {
                 cacheCreateAbove200k: cache_creation_input_token_cost_above_200k_tokens,
                 cacheReadAbove200k: cache_read_input_token_cost_above_200k_tokens,
                 fastMultiplier: provider_specific_entry?.fast,
-                openAI: openAI
+                openAI: openAI,
+                anthropicAbove100k: hasAbove100k ? .init(
+                    input: input_cost_per_token_above_100k_tokens,
+                    output: output_cost_per_token_above_100k_tokens,
+                    cacheCreate: cache_creation_input_token_cost_above_100k_tokens,
+                    cacheCreate1h: cache_creation_input_token_cost_above_1hr_above_100k_tokens,
+                    cacheRead: cache_read_input_token_cost_above_100k_tokens
+                ) : nil
             )
         }
     }

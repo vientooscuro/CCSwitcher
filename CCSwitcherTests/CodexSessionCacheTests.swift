@@ -6,6 +6,31 @@ import XCTest
 /// aggregates instead of touching the on-disk cache.
 final class CodexSessionCacheTests: XCTestCase {
 
+    func testConfirmedRequestsDeduplicateAcrossForksWithoutMergingDistinctResponses() throws {
+        func parse(session: String, turn: String, response: String, timestamp: String, model: String) throws -> CodexRolloutAggregate {
+            let text = """
+            {"type":"session_meta","payload":{"id":"\(session)"}}
+            {"type":"turn_context","payload":{"turn_id":"\(turn)","model":"\(model)"}}
+            {"type":"token_usage_record","payload":{"thread_id":"\(session)","turn_id":"\(turn)","response_id":"\(response)","usage":{"input_tokens":1000,"cached_input_tokens":800,"output_tokens":50,"reasoning_output_tokens":10,"total_tokens":1050}}}
+            {"timestamp":"\(timestamp)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":9000,"cached_input_tokens":7000,"output_tokens":500},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":800,"output_tokens":50}}}}
+            """
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: url) }
+            try text.write(to: url, atomically: true, encoding: .utf8)
+            return try XCTUnwrap(CodexRolloutParser.parse(contentsOf: url.path, relativePath: "fork.jsonl", mtime: 1))
+        }
+        let original = try parse(session: "a", turn: "a1", response: "resp_1", timestamp: "2026-11-10T10:00:00Z", model: "gpt-5.4")
+        let fork = try parse(session: "b", turn: "b1", response: "resp_1", timestamp: "2026-11-10T11:00:00Z", model: "gpt-5.4")
+        let independent = try parse(session: "c", turn: "c1", response: "resp_2", timestamp: "2026-11-10T10:00:00Z", model: "gpt-5.4")
+        let otherModel = try parse(session: "a", turn: "a1", response: "resp_3", timestamp: "2026-11-10T10:00:00Z", model: "gpt-5.5")
+        let otherDay = try parse(session: "a", turn: "a1", response: "resp_4", timestamp: "2026-11-11T10:00:00Z", model: "gpt-5.4")
+
+        let totals = CodexSessionCache.mergedTokensByDayAndModel(from: [fork, otherDay, original, independent, otherModel])
+        XCTAssertEqual(totals["2026-11-10"]?["gpt-5.4"]?.inputTokens, 2000)
+        XCTAssertEqual(totals["2026-11-10"]?["gpt-5.5"]?.inputTokens, 1000)
+        XCTAssertEqual(totals["2026-11-11"]?["gpt-5.4"]?.inputTokens, 1000)
+    }
+
     private func withUsageEvents(_ aggregate: CodexRolloutAggregate) -> CodexRolloutAggregate {
         var result = aggregate
         var previous: CodexTokenTotals?

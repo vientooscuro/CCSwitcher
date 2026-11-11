@@ -29,6 +29,74 @@ final class AppStateRefreshPhaseTests: XCTestCase {
         state.finishStatisticsRefresh(generation: try! XCTUnwrap(generation))
     }
 
+    func testClaudeStatisticsRefreshExpiresAndForceBypassesInterval() throws {
+        let state = AppState()
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let first = try XCTUnwrap(state.beginStatisticsRefresh(force: false, now: start))
+        state.finishStatisticsRefresh(generation: first, snapshotAt: start)
+
+        XCTAssertNil(state.beginStatisticsRefresh(force: false, now: start.addingTimeInterval(59)))
+        let forced = try XCTUnwrap(state.beginStatisticsRefresh(force: true, now: start.addingTimeInterval(59)))
+        state.finishStatisticsRefresh(generation: forced, snapshotAt: start.addingTimeInterval(59))
+        XCTAssertNotNil(state.beginStatisticsRefresh(force: false, now: start.addingTimeInterval(119)))
+    }
+
+    func testClaudeStatisticsRefreshExpiresAtDayBoundary() throws {
+        let state = AppState()
+        let day = Calendar.current.startOfDay(for: Date())
+        let previousDay = day.addingTimeInterval(-1)
+        let first = try XCTUnwrap(state.beginStatisticsRefresh(force: false, now: previousDay))
+        state.finishStatisticsRefresh(generation: first, snapshotAt: previousDay)
+
+        XCTAssertNotNil(state.beginStatisticsRefresh(force: false, now: day))
+    }
+
+    func testCodexStatisticsRefreshExpiresAndScopeInvalidatesSnapshot() throws {
+        let suite = "CodexStatisticsFreshnessTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let state = CodexState(defaults: defaults, loadWidgetData: { _ in nil })
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let first = try XCTUnwrap(state.beginStatisticsRefreshIfIdle())
+        state.finishStatisticsRefresh(generation: first, snapshotAt: start)
+
+        XCTAssertFalse(state.shouldRefreshStatistics(force: false, now: start.addingTimeInterval(59)))
+        XCTAssertTrue(state.shouldRefreshStatistics(force: true, now: start.addingTimeInterval(59)))
+        XCTAssertTrue(state.shouldRefreshStatistics(force: false, now: start.addingTimeInterval(60)))
+        state.statisticsScope = .currentAccount
+        XCTAssertTrue(state.needsInitialStatisticsRefresh)
+        XCTAssertTrue(state.shouldRefreshStatistics(force: false, now: start.addingTimeInterval(1)))
+    }
+
+    func testCodexStatisticsRefreshExpiresAtDayBoundary() throws {
+        let suite = "CodexStatisticsDayTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let state = CodexState(defaults: defaults, loadWidgetData: { _ in nil })
+        let day = Calendar.current.startOfDay(for: Date())
+        let first = try XCTUnwrap(state.beginStatisticsRefreshIfIdle())
+        state.finishStatisticsRefresh(generation: first, snapshotAt: day.addingTimeInterval(-1))
+
+        XCTAssertTrue(state.shouldRefreshStatistics(force: false, now: day))
+    }
+
+    func testCodexDiscardedScopeRefreshCannotReplaceCurrentSnapshot() throws {
+        let suite = "CodexStatisticsScopeRaceTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let state = CodexState(defaults: defaults, loadWidgetData: { _ in nil })
+        let stale = try XCTUnwrap(state.beginStatisticsRefreshIfIdle())
+        state.statisticsScope = .currentAccount
+        let current = try XCTUnwrap(state.beginStatisticsRefreshIfIdle())
+
+        state.finishStatisticsRefresh(generation: stale, snapshotAt: Date())
+        XCTAssertTrue(state.isStatisticsLoading)
+        XCTAssertFalse(state.hasStatisticsSnapshot)
+        state.finishStatisticsRefresh(generation: current, snapshotAt: Date())
+        XCTAssertTrue(state.hasStatisticsSnapshot)
+        XCTAssertFalse(state.isStatisticsLoading)
+    }
+
     func testCodexStatisticsPhaseRejectsOverlappingRefreshes() {
         let suite = "CodexStatisticsPhaseTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
