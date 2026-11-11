@@ -180,20 +180,18 @@ struct MainMenuView: View {
 
     // MARK: - Dynamic Popover Height
 
-    /// Popover height is driven by measured Usage tab content + measured chrome.
-    /// The Usage tab is chosen as the height reference because it's the
-    /// content-heaviest tab; sizing for it gives other tabs enough headroom.
-    /// Capped only by available screen space; no artificial floor — the popover
-    /// matches its content exactly, so there is no padding gap inside the
-    /// ScrollView when content is short.
+    /// Costs uses the available screen height to show more history. Other tabs
+    /// retain the measured Usage height so short content stays compact.
     private var popoverHeight: CGFloat {
-        let screenCap: CGFloat = (NSScreen.main?.visibleFrame.height ?? 900) - 100
-        let maxHeight: CGFloat = min(900, screenCap)
+        let screen = NSApp.keyWindow?.screen ?? NSScreen.main
+        return Self.popoverHeight(tab: selectedTab, screenHeight: screen?.visibleFrame.height ?? 900,
+                                  chromeHeight: chromeHeight, usageHeight: usageContentHeight)
+    }
 
-        // +1 for the Divider between content and footer (not measured).
-        let desired = chromeHeight + usageContentHeight + 1
-
-        return min(maxHeight, desired)
+    static func popoverHeight(tab: Tab, screenHeight: CGFloat, chromeHeight: CGFloat, usageHeight: CGFloat) -> CGFloat {
+        if tab == .costs { return max(0, screenHeight - 20) }
+        let cap = min(900, max(0, screenHeight - 100))
+        return min(cap, chromeHeight + usageHeight + 1)
     }
 
     @ViewBuilder

@@ -1,4 +1,3 @@
-### Automatic updates
+### Costs view
 
-- Enable Sparkle updates with a manual check and an automatic-check setting in Settings.
-- Harden automated releases with signed and notarized builds, signed update feeds, and verified release assets.
+- Expand the Costs tab to use the available screen height, showing more daily history while keeping other tabs compact.
