@@ -22,7 +22,7 @@ jobs:
     runs-on: macos-26
     
     env:
-      IS_RELEASE: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+      IS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
 
     steps:
       - name: Require release credentials and a new tag
