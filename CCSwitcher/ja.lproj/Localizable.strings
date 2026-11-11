@@ -162,3 +162,5 @@
 "Weekly — usage vs time (7d)" = "週間 — 使用量 vs 時間（7日）";
 "The vertical line marks time elapsed in the window; fill past it means you're using faster than the clock." = "縦線 = 経過時間（その時間枠の進捗）。塗りつぶしがこれを超える = 時間より速く消費しています。";
 "Claude Fable 5 — most powerful model, the new flagship tier" = "Claude Fable 5 — 最も強力なモデル、新しいフラッグシップ層";
+
+"Automatically check for updates" = "アップデートを自動的に確認";

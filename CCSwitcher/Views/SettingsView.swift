@@ -125,6 +125,17 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.tertiary)
 
+            Button("Check for Updates") {
+                updateChecker.checkForUpdates()
+            }
+            .disabled(!updateChecker.canCheckForUpdates)
+
+            Toggle("Automatically check for updates", isOn: Binding(
+                get: { updateChecker.automaticallyChecksForUpdates },
+                set: { updateChecker.setAutomaticallyChecksForUpdates($0) }
+            ))
+            .fixedSize()
+
             Spacer()
 
             Text("Easily switch between Claude Code accounts and monitor usage.")

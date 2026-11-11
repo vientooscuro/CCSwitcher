@@ -200,3 +200,5 @@
 "Version %@ is available. You are currently running version %@.\n\nWould you like to download it now?" = "La versión %1$@ está disponible. Actualmente usas la versión %2$@.\n\n¿Quieres descargarla ahora?";
 "View Release" = "Ver versión";
 "You are running the latest version of CCSwitcher (%@)." = "Usas la versión más reciente de CCSwitcher (%@).";
+
+"Automatically check for updates" = "Buscar actualizaciones automáticamente";

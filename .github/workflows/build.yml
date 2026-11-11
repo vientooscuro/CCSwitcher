@@ -21,17 +21,44 @@ jobs:
     # binary is run on Tahoe.
     runs-on: macos-26
     
-    # Only run notarization if the secrets are available (e.g. not on forks)
     env:
-      HAS_APPLE_SECRETS: ${{ secrets.MAC_CERTS_P12_BASE64 != '' }}
-      HAS_SPARKLE_KEY: ${{ secrets.SPARKLE_EDDSA_KEY != '' }}
+      IS_RELEASE: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
 
     steps:
-      - name: Require release signing credentials
-        if: startsWith(github.ref, 'refs/tags/v') && (env.HAS_APPLE_SECRETS != 'true' || env.HAS_SPARKLE_KEY != 'true')
+      - name: Require release credentials and a new tag
+        if: env.IS_RELEASE == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APP_SPECIFIC_PASSWORD: ${{ secrets.APP_SPECIFIC_PASSWORD }}
+          SPARKLE_EDDSA_KEY: ${{ secrets.SPARKLE_EDDSA_KEY }}
+          MAC_CERTS_P12_PASSWORD: ${{ secrets.MAC_CERTS_P12_PASSWORD }}
+          MAC_CERTS_P12_BASE64: ${{ secrets.MAC_CERTS_P12_BASE64 }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          echo "Release signing and Sparkle credentials are required."
-          exit 1
+          set -euo pipefail
+          for name in APPLE_ID APPLE_TEAM_ID APP_SPECIFIC_PASSWORD SPARKLE_EDDSA_KEY MAC_CERTS_P12_PASSWORD MAC_CERTS_P12_BASE64; do
+            if [ -z "${!name}" ]; then
+              echo "Missing required release secret: $name" >&2
+              exit 1
+            fi
+          done
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must have the form vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          # Fail closed for API errors; only a 404 means there is no release.
+          response=$(gh api -i "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" 2> "$RUNNER_TEMP/release-check-error") && status=0 || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "A release for $GITHUB_REF_NAME already exists; refusing to modify it." >&2
+            exit 1
+          fi
+          if ! printf '%s\n' "$response" | head -1 | grep -Eq '^HTTP/[0-9.]+ 404([[:space:]]|$)'; then
+            echo "Could not establish whether the release already exists:" >&2
+            printf '%s\n' "$response" >&2
+            cat "$RUNNER_TEMP/release-check-error" >&2
+            exit 1
+          fi
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -51,7 +78,7 @@ jobs:
         run: xcodegen generate
 
       - name: Install Apple Certificate
-        if: ${{ env.HAS_APPLE_SECRETS == 'true' }}
+        if: env.IS_RELEASE == 'true'
         env:
           BUILD_CERTIFICATE_BASE64: ${{ secrets.MAC_CERTS_P12_BASE64 }}
           P12_PASSWORD: ${{ secrets.MAC_CERTS_P12_PASSWORD }}
@@ -88,8 +115,21 @@ jobs:
             build \
             SYMROOT=$(PWD)/build
 
+      - name: Verify built app version and build
+        if: env.IS_RELEASE == 'true'
+        run: |
+          set -euo pipefail
+          PLIST=build/Release/CCSwitcher.app/Contents/Info.plist
+          VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST")
+          BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$PLIST")
+          if [ "$VERSION" != "${GITHUB_REF_NAME#v}" ] || [[ ! "$BUILD" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match built version $VERSION, or build $BUILD is invalid." >&2
+            exit 1
+          fi
+          echo "Built version: $VERSION ($BUILD)"
+
       - name: Sign App
-        if: ${{ env.HAS_APPLE_SECRETS == 'true' }}
+        if: env.IS_RELEASE == 'true'
         run: |
           # Order matters: every nested binary inside Sparkle.framework must be
           # signed BEFORE the framework itself, otherwise sealing the framework
@@ -146,42 +186,51 @@ jobs:
             "CCSwitcher.app"
 
       - name: Sign DMG
-        if: ${{ env.HAS_APPLE_SECRETS == 'true' }}
+        if: env.IS_RELEASE == 'true'
         run: |
           cd build/Release
           codesign --force --sign "Developer ID Application" --timestamp CCSwitcher.dmg
 
       - name: Notarize DMG
-        if: ${{ env.HAS_APPLE_SECRETS == 'true' }}
+        if: env.IS_RELEASE == 'true'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APP_SPECIFIC_PASSWORD: ${{ secrets.APP_SPECIFIC_PASSWORD }}
         run: |
           cd build/Release
+          set -euo pipefail
           xcrun notarytool submit CCSwitcher.dmg \
             --apple-id "$APPLE_ID" \
             --team-id "$TEAM_ID" \
             --password "$APP_SPECIFIC_PASSWORD" \
-            --wait
+            --wait --output-format json > "$RUNNER_TEMP/notary-result.json"
+          python3 - "$RUNNER_TEMP/notary-result.json" <<'PYNOTARY'
+          import json, pathlib, sys
+          result = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          print(f"Notarization status: {result.get('status')}, id: {result.get('id')}")
+          if result.get('status') != 'Accepted':
+              raise SystemExit('Notarization was not accepted')
+          PYNOTARY
 
       - name: Staple Ticket to DMG
-        if: ${{ env.HAS_APPLE_SECRETS == 'true' }}
+        if: env.IS_RELEASE == 'true'
         run: |
           cd build/Release
           xcrun stapler staple CCSwitcher.dmg
+          xcrun stapler validate CCSwitcher.dmg
 
       - name: Download Sparkle tools
-        if: ${{ env.HAS_SPARKLE_KEY == 'true' && startsWith(github.ref, 'refs/tags/v') }}
+        if: env.IS_RELEASE == 'true'
         run: |
           SPARKLE_VERSION="2.9.0"
-          curl -sL -o "$RUNNER_TEMP/sparkle.tar.xz" \
+          curl -fsSL -o "$RUNNER_TEMP/sparkle.tar.xz" \
             "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-${SPARKLE_VERSION}.tar.xz"
           mkdir -p "$RUNNER_TEMP/sparkle"
           tar -xf "$RUNNER_TEMP/sparkle.tar.xz" -C "$RUNNER_TEMP/sparkle"
 
       - name: Prepare release notes
-        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        if: env.IS_RELEASE == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -220,7 +269,7 @@ jobs:
           cat "$HTML"
 
       - name: Sign DMG with Sparkle EdDSA + generate appcast.xml
-        if: ${{ env.HAS_SPARKLE_KEY == 'true' && startsWith(github.ref, 'refs/tags/v') }}
+        if: env.IS_RELEASE == 'true'
         env:
           SPARKLE_EDDSA_KEY: ${{ secrets.SPARKLE_EDDSA_KEY }}
         run: |
@@ -266,14 +315,26 @@ jobs:
             exit 1
           fi
 
-          VERSION="${GITHUB_REF_NAME#v}"
-          # Anchor the grep so it picks the SETTING line (e.g. `CURRENT_PROJECT_VERSION: "49"`)
-          # and skips reference lines like `CFBundleVersion: $(CURRENT_PROJECT_VERSION)`.
-          BUILD=$(grep -E '^\s*CURRENT_PROJECT_VERSION: ' ../../project.yml | head -1 | awk -F'"' '{print $2}')
-          if [ -z "$BUILD" ]; then
-            echo "ERROR: failed to parse CURRENT_PROJECT_VERSION from project.yml"
-            exit 1
-          fi
+          PLIST=CCSwitcher.app/Contents/Info.plist
+          VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST")
+          BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$PLIST")
+          PUBLIC_KEY=$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$PLIST")
+          # Verify the signature against the public key embedded in this app.
+          swift - "$PUBLIC_KEY" "$ED_SIGNATURE" CCSwitcher.dmg <<'SWIFT'
+          import Foundation
+          import CryptoKit
+          let args = CommandLine.arguments
+          guard let publicKey = Data(base64Encoded: args[1]),
+                let signature = Data(base64Encoded: args[2]) else {
+              fatalError("Invalid Sparkle public key or signature encoding")
+          }
+          let key = try Curve25519.Signing.PublicKey(rawRepresentation: publicKey)
+          let archive = try Data(contentsOf: URL(fileURLWithPath: args[3]), options: .mappedIfSafe)
+          guard key.isValidSignature(signature, for: archive) else {
+              fatalError("Sparkle signature does not match the app's public key")
+          }
+          print("Sparkle signature verified against the built app's public key")
+          SWIFT
           FILE_LENGTH=$(stat -f%z CCSwitcher.dmg)
           DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/CCSwitcher.dmg"
           PUB_DATE=$(date -u +"%a, %d %b %Y %H:%M:%S +0000")
@@ -316,51 +377,54 @@ jobs:
           name: CCSwitcher-macOS
           path: build/Release/CCSwitcher.dmg
 
-      - name: Generate latest.json
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Verify release files and checksums
+        if: env.IS_RELEASE == 'true'
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}/CCSwitcher.dmg"
+          set -euo pipefail
+          cd build/Release
+          shasum -a 256 CCSwitcher.dmg appcast.xml > SHA256SUMS
+          shasum -a 256 -c SHA256SUMS
+          VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' CCSwitcher.app/Contents/Info.plist)
+          BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' CCSwitcher.app/Contents/Info.plist)
+          python3 - "$VERSION" "$BUILD" <<'PYVERIFY'
+          import os, pathlib, sys, xml.etree.ElementTree as ET
+          version, build = sys.argv[1:]
+          ns = {'s': 'http://www.andymatuschak.org/xml-namespaces/sparkle'}
+          item = ET.parse('appcast.xml').find('./channel/item')
+          assert item is not None
+          assert item.findtext('s:version', namespaces=ns) == build
+          assert item.findtext('s:shortVersionString', namespaces=ns) == version == os.environ['GITHUB_REF_NAME'][1:]
+          enclosure = item.find('enclosure')
+          assert enclosure is not None
+          assert enclosure.get('url') == f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/download/{os.environ['GITHUB_REF_NAME']}/CCSwitcher.dmg"
+          assert enclosure.get('length') == str(pathlib.Path('CCSwitcher.dmg').stat().st_size)
+          assert enclosure.get('{http://www.andymatuschak.org/xml-namespaces/sparkle}edSignature')
+          PYVERIFY
 
-          cat > build/Release/latest.json <<EOF
-          {
-            "version": "$VERSION",
-            "notes": "",
-            "pub_date": "$PUB_DATE",
-            "platforms": {
-              "darwin-aarch64": {
-                "signature": "",
-                "url": "$DOWNLOAD_URL"
-              },
-              "darwin-x86_64": {
-                "signature": "",
-                "url": "$DOWNLOAD_URL"
-              }
-            }
-          }
-          EOF
-
-      - name: Release
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/v')
-        with:
-          body_path: ${{ runner.temp }}/release_notes.md
-          # appcast.xml is only produced when the Sparkle key is present; don't
-          # fail the release if it (or any listed file) is absent.
-          fail_on_unmatched_files: false
-          files: |
-            build/Release/CCSwitcher.dmg
-            build/Release/latest.json
-            build/Release/appcast.xml
+      - name: Create and publish a new release
+        if: env.IS_RELEASE == 'true'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Trigger Homebrew Tap Update
-        if: startsWith(github.ref, 'refs/tags/v') && success()
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.HOMEBREW_TAP_PAT }}
-          repository: XueshiQiao/homebrew_tap
-          event-type: update_cask
-          client-payload: '{"app_token": "ccswitcher"}'
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The API creates a new draft atomically. It fails if the tag already
+          # has a release, so an existing release can never be overwritten.
+          RELEASE_ID=$(gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+            -f tag_name="$GITHUB_REF_NAME" -f name="$GITHUB_REF_NAME" \
+            -F draft=true -f body="$(cat "$RUNNER_TEMP/release_notes.md")" --jq .id)
+          for file in CCSwitcher.dmg appcast.xml SHA256SUMS; do
+            gh api --method POST \
+              -H 'Content-Type: application/octet-stream' \
+              "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$file" \
+              --input "build/Release/$file" --silent
+          done
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" > "$RUNNER_TEMP/release-assets.json"
+          python3 - "$RUNNER_TEMP/release-assets.json" <<'PYASSETS'
+          import json, pathlib, sys
+          assets = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          expected = {name: pathlib.Path('build/Release', name).stat().st_size for name in ('CCSwitcher.dmg', 'appcast.xml', 'SHA256SUMS')}
+          actual = {asset['name']: asset['size'] for asset in assets if asset['state'] == 'uploaded'}
+          if actual != expected:
+              raise SystemExit(f'Release assets do not match: {actual} != {expected}')
+          PYASSETS
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -F draft=false --silent

@@ -1,17 +1,75 @@
 import Foundation
+import Sparkle
 import SwiftUI
 
-/// Auto-update is disabled in this fork until we publish our own appcast.xml
-/// signed with an EdDSA key we own (see project.yml SUPublicEDKey/SUFeedURL).
-/// Sparkle stays linked so we can re-enable without source surgery; this
-/// stub just never instantiates `SPUStandardUpdaterController`, so no
-/// background checks are scheduled and no network traffic happens.
+@MainActor
+protocol UpdateDriving: AnyObject {
+    var canCheckForUpdates: Bool { get }
+    var automaticallyChecksForUpdates: Bool { get set }
+    var onStateChange: (() -> Void)? { get set }
+    func checkForUpdates()
+}
+
+@MainActor
+private final class SparkleUpdateDriver: UpdateDriving {
+    private let controller = SPUStandardUpdaterController(
+        startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil
+    )
+    private var observations: [NSKeyValueObservation] = []
+    var onStateChange: (() -> Void)?
+
+    init() {
+        let updater = controller.updater
+        observations = [
+            updater.observe(\.canCheckForUpdates, options: [.new]) { [weak self] _, _ in
+                DispatchQueue.main.async { self?.onStateChange?() }
+            },
+            updater.observe(\.automaticallyChecksForUpdates, options: [.new]) { [weak self] _, _ in
+                DispatchQueue.main.async { self?.onStateChange?() }
+            }
+        ]
+    }
+
+    var canCheckForUpdates: Bool { controller.updater.canCheckForUpdates }
+    var automaticallyChecksForUpdates: Bool {
+        get { controller.updater.automaticallyChecksForUpdates }
+        set { controller.updater.automaticallyChecksForUpdates = newValue }
+    }
+
+    func checkForUpdates() {
+        controller.checkForUpdates(nil)
+    }
+}
+
 @MainActor
 final class UpdateChecker: ObservableObject {
-    @Published var isChecking = false
+    @Published private(set) var canCheckForUpdates: Bool
+    @Published private(set) var automaticallyChecksForUpdates: Bool
+    private let driver: UpdateDriving
 
-    init() {}
+    convenience init() {
+        self.init(driver: SparkleUpdateDriver())
+    }
 
-    /// No-op. Kept for source compatibility with the Settings UI.
-    func checkForUpdates(manual: Bool = false) {}
+    init(driver: UpdateDriving) {
+        self.driver = driver
+        canCheckForUpdates = driver.canCheckForUpdates
+        automaticallyChecksForUpdates = driver.automaticallyChecksForUpdates
+        driver.onStateChange = { [weak self] in self?.refreshState() }
+    }
+
+    func checkForUpdates() {
+        guard driver.canCheckForUpdates else { return }
+        driver.checkForUpdates()
+    }
+
+    func setAutomaticallyChecksForUpdates(_ enabled: Bool) {
+        driver.automaticallyChecksForUpdates = enabled
+        refreshState()
+    }
+
+    private func refreshState() {
+        canCheckForUpdates = driver.canCheckForUpdates
+        automaticallyChecksForUpdates = driver.automaticallyChecksForUpdates
+    }
 }
