@@ -51,6 +51,7 @@ actor CodexSessionCache {
 
     private var files: [String: CodexRolloutAggregate] = [:]
     private var loaded = false
+    private var needsPersistence = false
 
     private static let defaultCacheURL: URL = {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -160,6 +161,7 @@ actor CodexSessionCache {
         guard !Task.isCancelled else { return false }
         let removed = files.keys.filter { selection.includes($0) && !plan.validPaths.contains($0) }
         for path in removed { files.removeValue(forKey: path) }
+        if !removed.isEmpty { needsPersistence = true }
         let invalidatedPaths = Set(removed)
         var processed = plan.total - plan.pending.count
         var failures = plan.failures
@@ -182,6 +184,7 @@ actor CodexSessionCache {
             if let parsed {
                 files[item.url.path] = parsed
                 reparsed += 1
+                needsPersistence = true
             } else {
                 failures += 1
             }
@@ -479,6 +482,7 @@ actor CodexSessionCache {
                 guard roots.contains(where: { components.count > $0.count && components.starts(with: $0) }) else { continue }
                 if let existing = files[path], existing.mtime >= aggregate.mtime { continue }
                 files[path] = aggregate
+                if url != cacheURL { needsPersistence = true }
             }
         }
         log.info("ensureLoaded: merged \(files.count) cached files")
@@ -492,6 +496,7 @@ actor CodexSessionCache {
     }
 
     private func save(invalidatedPaths: Set<String>) {
+        guard needsPersistence else { return }
         let lockPath = cacheURL.path + ".lock"
         let descriptor = open(lockPath, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
         guard descriptor >= 0 else { return }
@@ -516,7 +521,12 @@ actor CodexSessionCache {
             }
         }
         guard let data = try? JSONEncoder().encode(Envelope(version: Self.currentVersion, files: files)) else { return }
-        try? data.write(to: cacheURL, options: .atomic)
+        do {
+            try data.write(to: cacheURL, options: .atomic)
+            needsPersistence = false
+        } catch {
+            log.info("Failed to save session cache")
+        }
     }
 
     private static func durationText(minutes: Int) -> String {

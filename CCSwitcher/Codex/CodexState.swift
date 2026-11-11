@@ -8,7 +8,7 @@ enum CodexStatisticsScope: String {
 }
 
 enum CodexStatisticsCompleteness {
-    case loading, partial, complete
+    case loading, verifying, partial, complete
 }
 
 /// Desktop accounts keep independent live credentials; snapshots are never restored.
@@ -45,12 +45,13 @@ final class CodexState: ObservableObject, ProviderSurface {
     @Published private(set) var statisticsArchiveProgress: (processed: Int, total: Int)?
     private var statisticsGeneration = UUID()
     private var statisticsArchiveTask: Task<Void, Never>?
+    private var statisticsCurrentTask: Task<Bool, Never>?
     private var lastStatisticsSnapshotAt: Date?
     private var statisticsWaiters: [CheckedContinuation<Void, Never>] = []
     private var accountRefreshWaiters: [CheckedContinuation<Void, Never>] = []
     private static let statisticsMinInterval: TimeInterval = 60
     private(set) var hasStatisticsSnapshot = false
-    var needsInitialStatisticsRefresh: Bool { !hasStatisticsSnapshot }
+    var needsInitialStatisticsRefresh: Bool { lastStatisticsSnapshotAt == nil }
     /// Set when the live `auth.json` fingerprint matches no known account —
     /// surfaced on the active account's card until the user imports it.
     @Published private var desyncNotice: String?
@@ -70,6 +71,95 @@ final class CodexState: ObservableObject, ProviderSurface {
     private let cachedUsage: @MainActor (UUID) async -> CodexUsageService.Result?
     private let loadWidgetData: (String) -> WidgetData?
     private var profileSessionCaches: [String: CodexSessionCache] = [:]
+    private var statisticsSnapshots: [String: StatisticsSnapshot] = [:]
+
+    private struct StatisticsSnapshot: Codable {
+        struct Day: Codable {
+            let date: String
+            let cost: Double
+            let sessionCount: Int?
+            let modelBreakdown: [String: Double]
+            let inputTokens: Int
+            let outputTokens: Int
+            let cacheWriteTokens: Int
+            let cacheReadTokens: Int
+        }
+        struct Model: Codable {
+            let name: String
+            let count: Int
+        }
+        let timestamp: Date
+        let todayCost: Double
+        let daily: [Day]
+        let unpricedModels: [String]
+        let hasUnknownServiceTiers: Bool
+        let turns: Int
+        let activeTimeText: String
+        let linesWritten: Int?
+        let models: [Model]
+        let complete: Bool
+
+        init(cost: CostSeriesModel, activity: ActivitySummaryModel, complete: Bool, timestamp: Date) {
+            self.timestamp = timestamp
+            todayCost = cost.todayCost
+            daily = cost.daily.map { Day(date: $0.date, cost: $0.cost, sessionCount: $0.sessionCount,
+                modelBreakdown: $0.modelBreakdown, inputTokens: $0.inputTokens, outputTokens: $0.outputTokens,
+                cacheWriteTokens: $0.cacheWriteTokens, cacheReadTokens: $0.cacheReadTokens) }
+            unpricedModels = cost.unpricedModels
+            hasUnknownServiceTiers = cost.hasUnknownServiceTiers
+            turns = activity.turns
+            activeTimeText = activity.activeTimeText
+            linesWritten = activity.linesWritten
+            models = activity.perModel.map { Model(name: $0.displayName, count: $0.count) }
+            self.complete = complete
+        }
+
+        var cost: CostSeriesModel {
+            CostSeriesModel(todayCost: todayCost, daily: daily.map {
+                DailyCostEntry(date: $0.date, cost: $0.cost, sessionCount: $0.sessionCount,
+                    modelBreakdown: $0.modelBreakdown, inputTokens: $0.inputTokens, outputTokens: $0.outputTokens,
+                    cacheWriteTokens: $0.cacheWriteTokens, cacheReadTokens: $0.cacheReadTokens)
+            }, unpricedModels: unpricedModels, hasUnknownServiceTiers: hasUnknownServiceTiers)
+        }
+        var activity: ActivitySummaryModel {
+            ActivitySummaryModel(turns: turns, activeTimeText: activeTimeText, linesWritten: linesWritten,
+                perModel: models.map { ModelUsageEntry(displayName: $0.name, count: $0.count,
+                    tint: CodexDisplayMapper.tint(forModel: $0.name)) })
+        }
+    }
+
+    private func statisticsKey(scope: CodexStatisticsScope, profile: CodexDesktopProfile) -> String {
+        let homes = scope == .allProfiles ? profiles.statisticsHomes : [profile.home]
+        let roots = homes.flatMap { home in
+            [home.appendingPathComponent("sessions"), home.appendingPathComponent("archived_sessions")]
+        }.map { $0.standardizedFileURL.resolvingSymlinksInPath().path }.sorted()
+        let identity = scope == .currentAccount ? profile.home.standardizedFileURL.resolvingSymlinksInPath().path : ""
+        return ([scope.rawValue, identity] + roots).joined(separator: "\n")
+    }
+
+    private func snapshotDefaultsKey(_ key: String) -> String {
+        "codexStatisticsSummary.v1." + Data(key.utf8).base64EncodedString()
+    }
+
+    private func restoreStatisticsSnapshot() {
+        let key = statisticsKey(scope: statisticsScope, profile: selectedProfile)
+        let snapshot = statisticsSnapshots[key] ?? defaults.data(forKey: snapshotDefaultsKey(key)).flatMap {
+            try? JSONDecoder().decode(StatisticsSnapshot.self, from: $0)
+        }
+        guard let snapshot, Calendar.current.isDateInToday(snapshot.timestamp) else { return }
+        statisticsSnapshots[key] = snapshot
+        costSeries = snapshot.cost
+        activitySummary = snapshot.activity
+        hasStatisticsSnapshot = true
+        statisticsCompleteness = snapshot.complete ? .verifying : .partial
+    }
+
+    private func saveStatisticsSnapshot(key: String, cost: CostSeriesModel, activity: ActivitySummaryModel,
+                                        complete: Bool, timestamp: Date) {
+        let snapshot = StatisticsSnapshot(cost: cost, activity: activity, complete: complete, timestamp: timestamp)
+        statisticsSnapshots[key] = snapshot
+        if let data = try? JSONEncoder().encode(snapshot) { defaults.set(data, forKey: snapshotDefaultsKey(key)) }
+    }
     private let defaults: UserDefaults
     let profiles: CodexDesktopProfiles
     private let openDesktop: (CodexDesktopProfile) async throws -> Void
@@ -110,7 +200,7 @@ final class CodexState: ObservableObject, ProviderSurface {
         self.loadWidgetData = loadWidgetData
         statisticsScope = defaults.string(forKey: "codexStatisticsScope").flatMap(CodexStatisticsScope.init(rawValue:)) ?? .allProfiles
         accounts = CodexAccountRegistry.load(from: defaults)
-        hydrateFromWidgetCache()
+        restoreStatisticsSnapshot()
     }
 
     var selectedProfile: CodexDesktopProfile {
@@ -313,6 +403,8 @@ final class CodexState: ObservableObject, ProviderSurface {
     private func invalidateStatistics() {
         statisticsArchiveTask?.cancel()
         statisticsArchiveTask = nil
+        statisticsCurrentTask?.cancel()
+        statisticsCurrentTask = nil
         statisticsGeneration = UUID()
         costSeries = .empty
         activitySummary = .empty
@@ -321,6 +413,7 @@ final class CodexState: ObservableObject, ProviderSurface {
         isStatisticsLoading = false
         statisticsCompleteness = .loading
         statisticsArchiveProgress = nil
+        restoreStatisticsSnapshot()
         resumeStatisticsWaiters()
     }
 
@@ -343,7 +436,7 @@ final class CodexState: ObservableObject, ProviderSurface {
         let roots = homes.flatMap { home in
             [home.appendingPathComponent("sessions").path, home.appendingPathComponent("archived_sessions").path]
         }.sorted()
-        let key = "\(scope == .allProfiles ? "all" : "current")\n" + roots.joined(separator: "\n")
+        let key = statisticsKey(scope: scope, profile: profile)
         let sessionCache: CodexSessionCache
         if let cached = profileSessionCaches[key] {
             sessionCache = cached
@@ -361,14 +454,23 @@ final class CodexState: ObservableObject, ProviderSurface {
         }
         await PricingService.shared.reloadIfFreshChanged()
         PricingService.shared.refreshInBackground()
-        let uncompressedOK = await sessionCache.refreshFromFilesystem(selection: .uncompressed)
+        guard statisticsGeneration == generation, statisticsScope == scope, selectedProfile == profile else { return }
+        let currentTask = Task { await sessionCache.refreshFromFilesystem(selection: .uncompressed) }
+        statisticsCurrentTask = currentTask
+        let uncompressedOK = await currentTask.value
+        guard !currentTask.isCancelled, statisticsGeneration == generation else { return }
+        statisticsCurrentTask = nil
         let cost = await sessionCache.costSeries(selection: .uncompressed)
         let activity = await sessionCache.activityToday(selection: .uncompressed)
         guard statisticsGeneration == generation, statisticsScope == scope, selectedProfile == profile else { return }
-        costSeries = cost
-        activitySummary = activity
-        hasStatisticsSnapshot = true
-        statisticsCompleteness = .partial
+        if !hasStatisticsSnapshot {
+            costSeries = cost
+            activitySummary = activity
+            hasStatisticsSnapshot = true
+            statisticsCompleteness = .partial
+            saveStatisticsSnapshot(key: key, cost: cost, activity: activity,
+                                   complete: false, timestamp: statisticsStartedAt)
+        }
         if notify { didRefresh?() }
         statisticsArchiveProgress = (0, 0)
         statisticsArchiveTask = Task { [weak self] in
@@ -384,8 +486,13 @@ final class CodexState: ObservableObject, ProviderSurface {
                 await MainActor.run { [weak self] in
                     guard let self, self.statisticsGeneration == generation,
                           self.statisticsScope == scope, self.selectedProfile == profile else { return }
+                    if let previous = self.statisticsSnapshots[key], previous.complete,
+                       Calendar.current.isDateInToday(previous.timestamp) { return }
                     self.costSeries = cost
                     self.activitySummary = activity
+                    self.statisticsCompleteness = .partial
+                    self.saveStatisticsSnapshot(key: key, cost: cost, activity: activity,
+                                                complete: false, timestamp: statisticsStartedAt)
                     self.didRefresh?()
                 }
             })
@@ -398,6 +505,8 @@ final class CodexState: ObservableObject, ProviderSurface {
             self.costSeries = fullCost
             self.activitySummary = fullActivity
             self.statisticsCompleteness = uncompressedOK && archiveOK ? .complete : .partial
+            self.saveStatisticsSnapshot(key: key, cost: fullCost, activity: fullActivity,
+                                        complete: uncompressedOK && archiveOK, timestamp: statisticsStartedAt)
             self.finishStatisticsRefresh(generation: generation, snapshotAt: statisticsStartedAt)
             self.statisticsArchiveTask = nil
             self.didRefresh?()

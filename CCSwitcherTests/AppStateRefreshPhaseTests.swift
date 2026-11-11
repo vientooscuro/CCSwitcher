@@ -112,7 +112,7 @@ final class AppStateRefreshPhaseTests: XCTestCase {
         XCTAssertFalse(state.isStatisticsLoading)
     }
 
-    func testCodexRestoresItsOwnStatisticsSnapshot() {
+    func testCodexDoesNotAttributeUnscopedWidgetSnapshotToSelectedScope() {
         let suite = "CodexStatisticsRestoreTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -125,9 +125,10 @@ final class AppStateRefreshPhaseTests: XCTestCase {
             provider == "Codex" ? snapshot : nil
         })
 
-        XCTAssertEqual(state.cost.todayCost, 7.5)
-        XCTAssertEqual(state.activity.turns, 12)
-        XCTAssertEqual(state.activity.linesWritten, 34)
+        XCTAssertEqual(state.cost.todayCost, 0)
+        XCTAssertEqual(state.activity.turns, 0)
+        XCTAssertNil(state.activity.linesWritten)
+        XCTAssertFalse(state.hasStatisticsSnapshot)
         XCTAssertTrue(state.needsInitialStatisticsRefresh)
     }
 

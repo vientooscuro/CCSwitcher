@@ -29,6 +29,15 @@ struct CostDetailView: View {
                         .font(.caption)
                         .padding()
                 } else {
+                    if (hub.surface as? CodexState)?.statisticsCompleteness == .verifying {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("Showing saved statistics while checking for updates.")
+                                .font(.caption)
+                                .foregroundStyle(theme.textSecondary)
+                        }
+                        .padding(.horizontal, 16)
+                    }
                     if (hub.surface as? CodexState)?.statisticsCompleteness == .partial {
                         HStack(alignment: .top, spacing: 8) {
                             if let codex = hub.surface as? CodexState, codex.isStatisticsLoading {

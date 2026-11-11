@@ -552,4 +552,22 @@ final class CodexSessionCacheTests: XCTestCase {
         XCTAssertEqual(merged["2026-09-01"]?.turns, 4)
         XCTAssertEqual(merged["2026-09-01"]?.linesAdded, 20)
     }
+    func testUnchangedCacheIsNotRewritten() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let sessions = home.appendingPathComponent("sessions")
+        let file = sessions.appendingPathComponent("rollout-one.jsonl")
+        let mtime = try writeRollout(file, id: "one")
+        let cacheURL = home.appendingPathComponent("cache.json")
+        try writeCache(cacheURL, files: [file.path: CodexRolloutAggregate(sessionId: "one", mtime: mtime)])
+        let original = try Data(contentsOf: cacheURL)
+        let oldDate = Date(timeIntervalSince1970: 1_000_000)
+        try FileManager.default.setAttributes([.modificationDate: oldDate], ofItemAtPath: cacheURL.path)
+        let cache = CodexSessionCache(sessionRoots: [sessions.path], cacheURL: cacheURL)
+        let success = await cache.refreshFromFilesystem()
+        XCTAssertTrue(success)
+        XCTAssertEqual(try Data(contentsOf: cacheURL), original)
+        XCTAssertEqual(try cacheURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate, oldDate)
+    }
+
 }
