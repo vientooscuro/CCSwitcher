@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 private let log = FileLog("CodexCache")
 
@@ -61,18 +62,18 @@ actor CodexSessionCache {
 
     private let sessionsRoots: [String]
     private let cacheURL: URL
-    private let seedCacheURL: URL?
+    private let seedCacheURLs: [URL]
 
     init(sessionsRoot: String = NSHomeDirectory() + "/.codex/sessions", cacheURL: URL? = nil) {
         self.sessionsRoots = [sessionsRoot, URL(fileURLWithPath: sessionsRoot).deletingLastPathComponent().appendingPathComponent("archived_sessions").path]
         self.cacheURL = cacheURL ?? Self.defaultCacheURL
-        self.seedCacheURL = nil
+        self.seedCacheURLs = []
     }
 
-    init(sessionRoots: [String], cacheURL: URL, seedCacheURL: URL? = nil) {
+    init(sessionRoots: [String], cacheURL: URL, seedCacheURL: URL? = nil, seedCacheURLs: [URL] = []) {
         self.sessionsRoots = sessionRoots
         self.cacheURL = cacheURL
-        self.seedCacheURL = seedCacheURL
+        self.seedCacheURLs = (seedCacheURL.map { [$0] } ?? []) + seedCacheURLs
     }
 
     enum FileSelection {
@@ -159,12 +160,13 @@ actor CodexSessionCache {
         guard !Task.isCancelled else { return false }
         let removed = files.keys.filter { selection.includes($0) && !plan.validPaths.contains($0) }
         for path in removed { files.removeValue(forKey: path) }
+        let invalidatedPaths = Set(removed)
         var processed = plan.total - plan.pending.count
         var failures = plan.failures
         var reparsed = 0
         progress?(processed, plan.total)
         if selection == .compressed {
-            save()
+            save(invalidatedPaths: invalidatedPaths)
             await snapshot?()
             guard !Task.isCancelled else { return false }
         }
@@ -186,7 +188,7 @@ actor CodexSessionCache {
             processed += 1
             batchCount += 1
             if batchCount >= 100 || Date().timeIntervalSince(checkpointAt) >= 15 {
-                save()
+                save(invalidatedPaths: invalidatedPaths)
                 progress?(processed, plan.total)
                 batchCount = 0
                 checkpointAt = Date()
@@ -197,7 +199,7 @@ actor CodexSessionCache {
                 }
             }
         }
-        save()
+        save(invalidatedPaths: invalidatedPaths)
         progress?(processed, plan.total)
         log.info("refresh: \(plan.total) files, \(reparsed) reparsed, \(removed.count) dropped, \(failures) failed in \(Int(Date().timeIntervalSince(start) * 1000))ms")
         return failures == 0
@@ -469,23 +471,17 @@ actor CodexSessionCache {
     private func ensureLoaded() {
         guard !loaded else { return }
         loaded = true
-        if let envelope = Self.loadEnvelope(from: cacheURL) {
-            files = Self.normalizedFiles(envelope.files)
-            log.info("ensureLoaded: \(files.count) cached files")
-            return
-        }
-        guard let seedCacheURL, let envelope = Self.loadEnvelope(from: seedCacheURL) else {
-            log.info("ensureLoaded: no usable cache, starting empty")
-            return
-        }
         let roots = sessionsRoots.map { Self.canonicalURL(URL(fileURLWithPath: $0)).pathComponents }
-        files = Self.normalizedFiles(envelope.files).filter { path, _ in
-            let components = URL(fileURLWithPath: path).pathComponents
-            return roots.contains { root in
-                components.count > root.count && components.starts(with: root)
+        for url in [cacheURL] + seedCacheURLs {
+            guard let envelope = Self.loadEnvelope(from: url) else { continue }
+            for (path, aggregate) in Self.normalizedFiles(envelope.files) {
+                let components = URL(fileURLWithPath: path).pathComponents
+                guard roots.contains(where: { components.count > $0.count && components.starts(with: $0) }) else { continue }
+                if let existing = files[path], existing.mtime >= aggregate.mtime { continue }
+                files[path] = aggregate
             }
         }
-        log.info("ensureLoaded: seeded \(files.count) files from shared cache")
+        log.info("ensureLoaded: merged \(files.count) cached files")
     }
 
     private static func loadEnvelope(from url: URL) -> Envelope? {
@@ -495,7 +491,30 @@ actor CodexSessionCache {
         return envelope
     }
 
-    private func save() {
+    private func save(invalidatedPaths: Set<String>) {
+        let lockPath = cacheURL.path + ".lock"
+        let descriptor = open(lockPath, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else { return }
+        defer { close(descriptor) }
+        while flock(descriptor, LOCK_EX) != 0 {
+            guard errno == EINTR else { return }
+        }
+        defer { flock(descriptor, LOCK_UN) }
+
+        let roots = sessionsRoots.map { Self.canonicalURL(URL(fileURLWithPath: $0)).pathComponents }
+        if let envelope = Self.loadEnvelope(from: cacheURL) {
+            for (path, aggregate) in Self.normalizedFiles(envelope.files) {
+                let components = URL(fileURLWithPath: path).pathComponents
+                guard roots.contains(where: { components.count > $0.count && components.starts(with: $0) }) else { continue }
+                if invalidatedPaths.contains(path) {
+                    let attributes = try? FileManager.default.attributesOfItem(atPath: path)
+                    let mtime = (attributes?[.modificationDate] as? Date)?.timeIntervalSince1970
+                    guard mtime == aggregate.mtime else { continue }
+                }
+                if let existing = files[path], existing.mtime >= aggregate.mtime { continue }
+                files[path] = aggregate
+            }
+        }
         guard let data = try? JSONEncoder().encode(Envelope(version: Self.currentVersion, files: files)) else { return }
         try? data.write(to: cacheURL, options: .atomic)
     }

@@ -351,11 +351,11 @@ final class CodexState: ObservableObject, ProviderSurface {
             let cacheURL = scope == .allProfiles
                 ? profiles.defaultProfile.home.appendingPathComponent("ccswitcher-all-session-cache.json")
                 : profile.home.appendingPathComponent("ccswitcher-session-cache.json")
-            let seedCacheURL = scope == .currentAccount
-                ? profiles.defaultProfile.home.appendingPathComponent("ccswitcher-all-session-cache.json")
-                : nil
+            let seedCacheURLs = scope == .allProfiles
+                ? homes.map { $0.appendingPathComponent("ccswitcher-session-cache.json") }
+                : [profiles.defaultProfile.home.appendingPathComponent("ccswitcher-all-session-cache.json")]
             sessionCache = CodexSessionCache(
-                sessionRoots: roots, cacheURL: cacheURL, seedCacheURL: seedCacheURL
+                sessionRoots: roots, cacheURL: cacheURL, seedCacheURLs: seedCacheURLs
             )
             profileSessionCaches[key] = sessionCache
         }

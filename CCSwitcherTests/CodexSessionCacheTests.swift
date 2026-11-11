@@ -97,6 +97,78 @@ final class CodexSessionCacheTests: XCTestCase {
         XCTAssertEqual(saved.files[file.resolvingSymlinksInPath().path]?.sessionId, "profile")
     }
 
+    func testExistingCachesMergeByMtimeAcrossProfilesAndReconcileWithDisk() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let first = home.appendingPathComponent("first/sessions")
+        let second = home.appendingPathComponent("second/sessions")
+        let outside = home.appendingPathComponent("outside/sessions")
+        let firstFile = first.appendingPathComponent("rollout-first.jsonl")
+        let secondFile = second.appendingPathComponent("rollout-second.jsonl")
+        let changed = first.appendingPathComponent("rollout-changed.jsonl")
+        let deleted = first.appendingPathComponent("rollout-deleted.jsonl")
+        let outsideFile = outside.appendingPathComponent("rollout-outside.jsonl")
+        let firstTime = try writeRollout(firstFile, id: "disk-first")
+        let secondTime = try writeRollout(secondFile, id: "disk-second")
+        let changedTime = try writeRollout(changed, id: "disk-changed")
+        let outsideTime = try writeRollout(outsideFile, id: "outside")
+        let allURL = home.appendingPathComponent("all.json")
+        let firstURL = home.appendingPathComponent("first.json")
+        let secondURL = home.appendingPathComponent("second.json")
+        try writeCache(allURL, files: [
+            firstFile.path: CodexRolloutAggregate(sessionId: "old", mtime: firstTime - 1),
+            outsideFile.path: CodexRolloutAggregate(sessionId: "outside", mtime: outsideTime),
+        ])
+        try writeCache(firstURL, files: [
+            firstFile.path: CodexRolloutAggregate(sessionId: "first-cached", mtime: firstTime),
+            changed.path: CodexRolloutAggregate(sessionId: "stale", mtime: changedTime - 1),
+            deleted.path: CodexRolloutAggregate(sessionId: "deleted", mtime: 1),
+        ])
+        try writeCache(secondURL, files: [secondFile.path: CodexRolloutAggregate(sessionId: "second-cached", mtime: secondTime)])
+        let firstBefore = try Data(contentsOf: firstURL)
+        let secondBefore = try Data(contentsOf: secondURL)
+        let cache = CodexSessionCache(sessionRoots: [first.path, second.path], cacheURL: allURL, seedCacheURLs: [firstURL, secondURL])
+        let complete = await cache.refreshFromFilesystem()
+        XCTAssertTrue(complete)
+        let saved = try JSONDecoder().decode(CacheEnvelope.self, from: Data(contentsOf: allURL))
+        XCTAssertEqual(saved.files[firstFile.resolvingSymlinksInPath().path]?.sessionId, "first-cached")
+        XCTAssertEqual(saved.files[secondFile.resolvingSymlinksInPath().path]?.sessionId, "second-cached")
+        XCTAssertEqual(saved.files[changed.resolvingSymlinksInPath().path]?.sessionId, "disk-changed")
+        XCTAssertEqual(saved.files.count, 3)
+        XCTAssertEqual(try Data(contentsOf: firstURL), firstBefore)
+        XCTAssertEqual(try Data(contentsOf: secondURL), secondBefore)
+
+        let profile = CodexSessionCache(sessionRoots: [first.path], cacheURL: firstURL, seedCacheURLs: [allURL])
+        let profileComplete = await profile.refreshFromFilesystem()
+        XCTAssertTrue(profileComplete)
+        let profileSaved = try JSONDecoder().decode(CacheEnvelope.self, from: Data(contentsOf: firstURL))
+        XCTAssertEqual(profileSaved.files[changed.resolvingSymlinksInPath().path]?.sessionId, "disk-changed")
+        XCTAssertEqual(profileSaved.files.count, 2)
+    }
+
+    func testIndependentActorsMergeTheirWritesToTheSameCache() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let sessions = home.appendingPathComponent("sessions")
+        let plain = sessions.appendingPathComponent("rollout-plain.jsonl")
+        let compressed = sessions.appendingPathComponent("rollout-compressed.jsonl.zst")
+        _ = try writeRollout(plain, id: "plain")
+        let compressedData = try XCTUnwrap(Data(base64Encoded: "KLUv/QRYsQEAeyJ0eXBlIjoic2Vzc2lvbl9tZXRhIiwicGF5bG9hZCI6eyJpZCI6ImNvbXByZXNzZWQifX0KiRayvg=="))
+        try compressedData.write(to: compressed)
+        let cacheURL = home.appendingPathComponent("cache.json")
+        let first = CodexSessionCache(sessionRoots: [sessions.path], cacheURL: cacheURL)
+        let second = CodexSessionCache(sessionRoots: [sessions.path], cacheURL: cacheURL)
+        _ = await first.costSeries()
+        _ = await second.costSeries()
+        let firstComplete = await first.refreshFromFilesystem(selection: .uncompressed)
+        let secondComplete = await second.refreshFromFilesystem(selection: .compressed)
+        XCTAssertTrue(firstComplete)
+        XCTAssertTrue(secondComplete)
+        let saved = try JSONDecoder().decode(CacheEnvelope.self, from: Data(contentsOf: cacheURL))
+        XCTAssertEqual(saved.files[plain.resolvingSymlinksInPath().path]?.sessionId, "plain")
+        XCTAssertEqual(saved.files[compressed.resolvingSymlinksInPath().path]?.sessionId, "compressed")
+    }
+
     func testCompressedRolloutIsParsedReusedAndRemoved() async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: home) }
