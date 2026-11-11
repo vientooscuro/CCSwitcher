@@ -180,7 +180,7 @@ struct MainMenuView: View {
 
     // MARK: - Dynamic Popover Height
 
-    /// Costs uses the available screen height to show more history. Other tabs
+    /// Costs uses 60% of the available screen height. Other tabs
     /// retain the measured Usage height so short content stays compact.
     private var popoverHeight: CGFloat {
         let screen = NSApp.keyWindow?.screen ?? NSScreen.main
@@ -189,7 +189,7 @@ struct MainMenuView: View {
     }
 
     static func popoverHeight(tab: Tab, screenHeight: CGFloat, chromeHeight: CGFloat, usageHeight: CGFloat) -> CGFloat {
-        if tab == .costs { return max(0, screenHeight - 20) }
+        if tab == .costs { return max(0, screenHeight * 0.6) }
         let cap = min(900, max(0, screenHeight - 100))
         return min(cap, chromeHeight + usageHeight + 1)
     }

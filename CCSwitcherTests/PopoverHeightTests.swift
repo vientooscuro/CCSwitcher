@@ -4,8 +4,8 @@ import XCTest
 @MainActor
 final class PopoverHeightTests: XCTestCase {
     func testCostsUseAvailableScreenHeightInsteadOfUsageHeight() {
-        XCTAssertEqual(MainMenuView.popoverHeight(tab: .costs, screenHeight: 1200, chromeHeight: 180, usageHeight: 420), 1180)
-        XCTAssertEqual(MainMenuView.popoverHeight(tab: .costs, screenHeight: 700, chromeHeight: 180, usageHeight: 420), 680)
+        XCTAssertEqual(MainMenuView.popoverHeight(tab: .costs, screenHeight: 1200, chromeHeight: 180, usageHeight: 420), 720)
+        XCTAssertEqual(MainMenuView.popoverHeight(tab: .costs, screenHeight: 700, chromeHeight: 180, usageHeight: 420), 420)
     }
 
     func testOtherTabsKeepMeasuredHeightAndScreenCap() {

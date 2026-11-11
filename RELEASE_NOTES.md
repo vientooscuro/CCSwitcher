@@ -1,3 +1,3 @@
 ### Costs view
 
-- Expand the Costs tab to use the available screen height, showing more daily history while keeping other tabs compact.
+- Set the Costs tab height to 60% of the available screen height, showing more daily history while keeping other tabs compact.
