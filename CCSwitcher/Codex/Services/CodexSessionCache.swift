@@ -61,92 +61,146 @@ actor CodexSessionCache {
 
     private let sessionsRoots: [String]
     private let cacheURL: URL
+    private let seedCacheURL: URL?
 
     init(sessionsRoot: String = NSHomeDirectory() + "/.codex/sessions", cacheURL: URL? = nil) {
         self.sessionsRoots = [sessionsRoot, URL(fileURLWithPath: sessionsRoot).deletingLastPathComponent().appendingPathComponent("archived_sessions").path]
         self.cacheURL = cacheURL ?? Self.defaultCacheURL
+        self.seedCacheURL = nil
     }
 
-    init(sessionRoots: [String], cacheURL: URL) {
+    init(sessionRoots: [String], cacheURL: URL, seedCacheURL: URL? = nil) {
         self.sessionsRoots = sessionRoots
         self.cacheURL = cacheURL
+        self.seedCacheURL = seedCacheURL
     }
 
-    private struct ScanResult {
-        let seenPaths: Set<String>
-        let updates: [String: CodexRolloutAggregate]
-        let reparsed: Int
+    enum FileSelection {
+        case all, uncompressed, compressed
+
+        func includes(_ path: String) -> Bool {
+            let name = URL(fileURLWithPath: path).lastPathComponent
+            guard name.hasPrefix("rollout-") else { return false }
+            switch self {
+            case .all: return name.hasSuffix(".jsonl") || name.hasSuffix(".jsonl.zst")
+            case .uncompressed: return name.hasSuffix(".jsonl")
+            case .compressed: return name.hasSuffix(".jsonl.zst")
+            }
+        }
     }
 
-    /// Synchronous, non-actor-isolated walk. `FileManager.enumerator`'s
-    /// `Sequence` conformance (`for-in`) is unavailable from async contexts
-    /// under Swift 6 strict concurrency, so — as in `SessionParseCacheV2` —
-    /// the walk lives in a plain static function driven by `nextObject()`,
-    /// and only its result crosses back onto the actor.
-    private static func scan(root: String, cachedMtimes: [String: Double]) -> ScanResult {
-        var seen: Set<String> = []
-        var updates: [String: CodexRolloutAggregate] = [:]
-        var reparsed = 0
+    private struct ScanPlan {
+        var validPaths: Set<String> = []
+        var pending: [(url: URL, mtime: Double)] = []
+        var total = 0
+        var failures = 0
+    }
 
+    private static func canonicalURL(_ url: URL) -> URL {
+        url.standardizedFileURL.resolvingSymlinksInPath()
+    }
+
+    private static func normalizedFiles(_ files: [String: CodexRolloutAggregate]) -> [String: CodexRolloutAggregate] {
+        var result: [String: CodexRolloutAggregate] = [:]
+        for (path, aggregate) in files {
+            let key = canonicalURL(URL(fileURLWithPath: path)).path
+            if let existing = result[key], existing.mtime >= aggregate.mtime { continue }
+            result[key] = aggregate
+        }
+        return result
+    }
+
+    /// Validate cached mtimes in one directory walk before publishing cached archives.
+    private static func scanPlan(roots: [String], cachedMtimes: [String: Double], selection: FileSelection) -> ScanPlan {
+        var plan = ScanPlan()
         let keys: [URLResourceKey] = [.contentModificationDateKey, .isRegularFileKey]
-        guard let walker = FileManager.default.enumerator(
-            at: URL(fileURLWithPath: root),
-            includingPropertiesForKeys: keys,
-            options: [.skipsHiddenFiles]
-        ) else { return ScanResult(seenPaths: [], updates: [:], reparsed: 0) }
-
-        while let url = walker.nextObject() as? URL {
-            let name = url.lastPathComponent
-            guard name.hasPrefix("rollout-"), name.hasSuffix(".jsonl") else { continue }
-            guard let values = try? url.resourceValues(forKeys: Set(keys)),
-                  values.isRegularFile == true,
-                  let modified = values.contentModificationDate else { continue }
-
-            let path = url.path
-            seen.insert(path)
-            let mtime = modified.timeIntervalSince1970
-
-            if let cachedMtime = cachedMtimes[path], cachedMtime == mtime { continue }
-
-            let parsed = autoreleasepool {
-                CodexRolloutParser.parse(contentsOf: path, relativePath: name, mtime: mtime)
+        for root in roots {
+            guard FileManager.default.fileExists(atPath: root) else { continue }
+            let rootComponents = canonicalURL(URL(fileURLWithPath: root)).pathComponents
+            guard let walker = FileManager.default.enumerator(
+                at: URL(fileURLWithPath: root), includingPropertiesForKeys: keys, options: [.skipsHiddenFiles],
+                errorHandler: { _, _ in plan.failures += 1; return true }
+            ) else {
+                plan.failures += 1
+                continue
             }
-            if let aggregate = parsed {
-                updates[path] = aggregate
-                reparsed += 1
+            while let url = walker.nextObject() as? URL {
+                if Task.isCancelled { return plan }
+                guard selection.includes(url.lastPathComponent) else { continue }
+                let canonical = canonicalURL(url)
+                let components = canonical.pathComponents
+                guard components.count > rootComponents.count, components.starts(with: rootComponents) else { continue }
+                plan.total += 1
+                guard let values = try? url.resourceValues(forKeys: Set(keys)),
+                      values.isRegularFile == true, let modified = values.contentModificationDate else {
+                    plan.failures += 1
+                    continue
+                }
+                let mtime = modified.timeIntervalSince1970
+                if cachedMtimes[canonical.path] == mtime {
+                    plan.validPaths.insert(canonical.path)
+                } else {
+                    plan.pending.append((canonical, mtime))
+                }
             }
         }
-
-        return ScanResult(seenPaths: seen, updates: updates, reparsed: reparsed)
+        plan.pending.sort { $0.mtime > $1.mtime }
+        return plan
     }
 
-    /// Walk the tree, re-parsing only files whose mtime changed. Runs on the
-    /// actor's executor, which is on the cooperative pool rather than the main
-    /// thread, so awaiting this never blocks the UI.
-    func refreshFromFilesystem() async {
+    /// Each saved batch is reusable after cancellation or an application restart.
+    @discardableResult
+    func refreshFromFilesystem(selection: FileSelection = .all,
+                               progress: (@Sendable (Int, Int) -> Void)? = nil,
+                               snapshot: (@Sendable () async -> Void)? = nil) async -> Bool {
         ensureLoaded()
-
         let start = Date()
-        let cachedMtimes: [String: Double] = files.mapValues { $0.mtime }
-        var seen: Set<String> = []
-        var updates: [String: CodexRolloutAggregate] = [:]
-        var reparsed = 0
-        for root in sessionsRoots {
-            let scan = Self.scan(root: root, cachedMtimes: cachedMtimes)
-            seen.formUnion(scan.seenPaths)
-            updates.merge(scan.updates) { _, new in new }
-            reparsed += scan.reparsed
-        }
-        let result = ScanResult(seenPaths: seen, updates: updates, reparsed: reparsed)
-
-        for (path, aggregate) in result.updates { files[path] = aggregate }
-
-        // Archiving moves a file between scanned roots; only deleted files disappear.
-        let removed = files.keys.filter { !result.seenPaths.contains($0) }
+        let plan = Self.scanPlan(roots: sessionsRoots, cachedMtimes: files.mapValues { $0.mtime }, selection: selection)
+        guard !Task.isCancelled else { return false }
+        let removed = files.keys.filter { selection.includes($0) && !plan.validPaths.contains($0) }
         for path in removed { files.removeValue(forKey: path) }
-
-        log.info("refresh: \(result.seenPaths.count) files, \(result.reparsed) reparsed, \(removed.count) dropped in \(Int(Date().timeIntervalSince(start) * 1000))ms")
+        var processed = plan.total - plan.pending.count
+        var failures = plan.failures
+        var reparsed = 0
+        progress?(processed, plan.total)
+        if selection == .compressed {
+            save()
+            await snapshot?()
+            guard !Task.isCancelled else { return false }
+        }
+        var batchCount = 0
+        var checkpointAt = Date()
+        var snapshotAt = Date()
+        for item in plan.pending {
+            guard !Task.isCancelled else { return false }
+            let parsed = autoreleasepool {
+                CodexRolloutParser.parse(contentsOf: item.url.path, relativePath: item.url.lastPathComponent, mtime: item.mtime)
+            }
+            guard !Task.isCancelled else { return false }
+            if let parsed {
+                files[item.url.path] = parsed
+                reparsed += 1
+            } else {
+                failures += 1
+            }
+            processed += 1
+            batchCount += 1
+            if batchCount >= 100 || Date().timeIntervalSince(checkpointAt) >= 15 {
+                save()
+                progress?(processed, plan.total)
+                batchCount = 0
+                checkpointAt = Date()
+                if Date().timeIntervalSince(snapshotAt) >= 15 {
+                    await snapshot?()
+                    guard !Task.isCancelled else { return false }
+                    snapshotAt = Date()
+                }
+            }
+        }
         save()
+        progress?(processed, plan.total)
+        log.info("refresh: \(plan.total) files, \(reparsed) reparsed, \(removed.count) dropped, \(failures) failed in \(Int(Date().timeIntervalSince(start) * 1000))ms")
+        return failures == 0
     }
 
     func releaseResidentData() {
@@ -159,14 +213,15 @@ actor CodexSessionCache {
     /// Cost per day, priced with the current LiteLLM table. Prices are resolved
     /// in a single hop so a concurrent pricing reload cannot mix old and new
     /// rates into one answer.
-    func costSeries() async -> CostSeriesModel {
+    func costSeries(selection: FileSelection = .all) async -> CostSeriesModel {
         ensureLoaded()
-        let usageEvents = Self.mergedUsageEvents(from: Array(files.values))
+        let selectedFiles = files.filter { selection.includes($0.key) }
+        let usageEvents = Self.mergedUsageEvents(from: Array(selectedFiles.values))
 
         // Copied/resumed files do not create extra sessions in the history.
         var byDate: [String: (cost: Double, models: [String: Double], totals: CodexTokenTotals, sessions: Int)] = [:]
         var sessionsByDay: [String: Set<String>] = [:]
-        for (path, aggregate) in files {
+        for (path, aggregate) in selectedFiles {
             for day in Set(aggregate.usageEvents.map(\.day)) {
                 sessionsByDay[day, default: []].insert(aggregate.sessionId ?? path)
             }
@@ -370,14 +425,15 @@ actor CodexSessionCache {
     }
 
     /// Today's activity, deduplicated per session across replayed rollout files.
-    func activityToday() -> ActivitySummaryModel {
+    func activityToday(selection: FileSelection = .all) -> ActivitySummaryModel {
         ensureLoaded()
         let today = Formatters.isoDay.string(from: Date())
+        let aggregates = files.filter { selection.includes($0.key) }.map(\.value)
 
-        let activity = Self.mergedActivityByDay(from: Array(files.values))[today] ?? CodexActivityTotals()
+        let activity = Self.mergedActivityByDay(from: aggregates)[today] ?? CodexActivityTotals()
         var perModelTokens: [String: Int] = [:]
 
-        for (model, totals) in Self.mergedTokensByDayAndModel(from: Array(files.values))[today] ?? [:] {
+        for (model, totals) in Self.mergedTokensByDayAndModel(from: aggregates)[today] ?? [:] {
             // Output tokens are the closest Codex analogue to "how much did
             // this model actually produce today".
             perModelTokens[model, default: 0] += totals.outputTokens
@@ -413,14 +469,30 @@ actor CodexSessionCache {
     private func ensureLoaded() {
         guard !loaded else { return }
         loaded = true
-        guard let data = try? Data(contentsOf: cacheURL),
-              let envelope = try? JSONDecoder().decode(Envelope.self, from: data),
-              envelope.version == Self.currentVersion else {
+        if let envelope = Self.loadEnvelope(from: cacheURL) {
+            files = Self.normalizedFiles(envelope.files)
+            log.info("ensureLoaded: \(files.count) cached files")
+            return
+        }
+        guard let seedCacheURL, let envelope = Self.loadEnvelope(from: seedCacheURL) else {
             log.info("ensureLoaded: no usable cache, starting empty")
             return
         }
-        files = envelope.files
-        log.info("ensureLoaded: \(files.count) cached files")
+        let roots = sessionsRoots.map { Self.canonicalURL(URL(fileURLWithPath: $0)).pathComponents }
+        files = Self.normalizedFiles(envelope.files).filter { path, _ in
+            let components = URL(fileURLWithPath: path).pathComponents
+            return roots.contains { root in
+                components.count > root.count && components.starts(with: root)
+            }
+        }
+        log.info("ensureLoaded: seeded \(files.count) files from shared cache")
+    }
+
+    private static func loadEnvelope(from url: URL) -> Envelope? {
+        guard let data = try? Data(contentsOf: url),
+              let envelope = try? JSONDecoder().decode(Envelope.self, from: data),
+              envelope.version == currentVersion else { return nil }
+        return envelope
     }
 
     private func save() {

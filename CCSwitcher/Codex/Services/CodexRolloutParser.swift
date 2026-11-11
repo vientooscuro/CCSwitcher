@@ -1,4 +1,5 @@
 import Foundation
+import libzstd
 
 private let log = FileLog("CodexRollout")
 
@@ -11,12 +12,6 @@ enum CodexRolloutParser {
     private static let idleGapSeconds: TimeInterval = 10 * 60
 
     static func parse(contentsOf path: String, relativePath: String, mtime: Double) -> CodexRolloutAggregate? {
-        guard let data = FileManager.default.contents(atPath: path),
-              let text = String(data: data, encoding: .utf8) else {
-            log.debug("parse: unreadable \(relativePath)")
-            return nil
-        }
-
         var aggregate = CodexRolloutAggregate()
         aggregate.mtime = mtime
 
@@ -40,9 +35,12 @@ enum CodexRolloutParser {
         var patchEventsByDay: [String: [CodexPatchEvent]] = [:]
         var activeMinuteBucketsByDay: [String: [Int]] = [:]
 
-        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
-            guard let lineData = line.data(using: .utf8),
-                  let event = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
+        guard let reader = try? RolloutLineReader(path: path, compressed: path.hasSuffix(".zst") || relativePath.hasSuffix(".zst")) else {
+            log.debug("parse: unreadable \(relativePath)")
+            return nil
+        }
+        while let lineData = reader.nextLine() {
+            guard let event = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
                 continue   // a partially written or corrupt line must not abort the file
             }
 
@@ -211,6 +209,11 @@ enum CodexRolloutParser {
                 break
             }
         }
+        if let error = reader.error {
+            log.debug("parse: unreadable or corrupt \(relativePath): \(error)")
+            return nil
+        }
+        guard !Task<Never, Never>.isCancelled else { return nil }
 
         // Unknown pricing must not erase real token usage.
         aggregate.usageEvents += pendingUsage
@@ -311,5 +314,123 @@ enum CodexRolloutParser {
 
     private static func parseTimestamp(_ raw: String) -> Date? {
         Formatters.isoFractional.date(from: raw) ?? Formatters.iso.date(from: raw)
+    }
+}
+
+private enum RolloutReadError: Error {
+    case invalidCompression
+    case invalidUTF8
+    case lineTooLong
+}
+
+/// Holds only compressed input, one decompressed block, and one JSONL line.
+private final class RolloutLineReader {
+    private static let chunkSize = 128 * 1024
+    private static let maximumLineSize = 128 * 1024 * 1024
+
+    private let handle: FileHandle
+    private let stream: OpaquePointer?
+    private var input = Data()
+    private var inputOffset = 0
+    private var reachedEOF = false
+    private var completedFrame = false
+    private var chunk = [UInt8]()
+    private var chunkOffset = 0
+    private var line = Data()
+    private(set) var error: Error?
+
+    init(path: String, compressed: Bool) throws {
+        handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
+        if compressed {
+            guard let context = ZSTD_createDStream() else { throw RolloutReadError.invalidCompression }
+            guard ZSTD_isError(ZSTD_initDStream(context)) == 0,
+                  ZSTD_isError(ZSTD_DCtx_setParameter(context, ZSTD_d_windowLogMax, 27)) == 0 else {
+                ZSTD_freeDStream(context)
+                throw RolloutReadError.invalidCompression
+            }
+            stream = context
+        } else {
+            stream = nil
+        }
+    }
+
+    deinit {
+        if let stream { ZSTD_freeDStream(stream) }
+        try? handle.close()
+    }
+
+    func nextLine() -> Data? {
+        do {
+            return try readLine()
+        } catch {
+            self.error = error
+            return nil
+        }
+    }
+
+    private func readLine() throws -> Data? {
+        while true {
+            try Task<Never, Never>.checkCancellation()
+            if chunkOffset < chunk.count {
+                let end = chunk[chunkOffset...].firstIndex(of: 10) ?? chunk.count
+                let length = end - chunkOffset
+                guard length <= Self.maximumLineSize - line.count else { throw RolloutReadError.lineTooLong }
+                line.append(contentsOf: chunk[chunkOffset..<end])
+                chunkOffset = end
+                if end < chunk.count {
+                    chunkOffset += 1
+                    if line.isEmpty { continue }
+                    return try takeLine()
+                }
+            }
+            guard let next = try nextChunk() else {
+                return line.isEmpty ? nil : try takeLine()
+            }
+            chunk = Array(next)
+            chunkOffset = 0
+        }
+    }
+
+    private func takeLine() throws -> Data {
+        guard String(data: line, encoding: .utf8) != nil else { throw RolloutReadError.invalidUTF8 }
+        let result = line
+        line = Data()
+        return result
+    }
+
+    private func nextChunk() throws -> Data? {
+        guard let stream else {
+            let data = try handle.read(upToCount: Self.chunkSize) ?? Data()
+            return data.isEmpty ? nil : data
+        }
+
+        while true {
+            try Task<Never, Never>.checkCancellation()
+            if inputOffset == input.count, !reachedEOF {
+                input = try handle.read(upToCount: Self.chunkSize) ?? Data()
+                inputOffset = 0
+                reachedEOF = input.isEmpty
+            }
+            if reachedEOF, completedFrame { return nil }
+
+            var output = [UInt8](repeating: 0, count: Self.chunkSize)
+            var outputCount = 0
+            var consumed = 0
+            let result: Int = input.withUnsafeBytes { source in
+                output.withUnsafeMutableBytes { destination in
+                    var inputBuffer = ZSTD_inBuffer(src: source.baseAddress, size: source.count, pos: inputOffset)
+                    var outputBuffer = ZSTD_outBuffer(dst: destination.baseAddress, size: destination.count, pos: 0)
+                    let result = ZSTD_decompressStream(stream, &outputBuffer, &inputBuffer)
+                    consumed = inputBuffer.pos - inputOffset
+                    outputCount = outputBuffer.pos
+                    return result
+                }
+            }
+            guard ZSTD_isError(result) == 0 else { throw RolloutReadError.invalidCompression }
+            inputOffset += consumed
+            completedFrame = result == 0
+            if outputCount > 0 { return Data(output.prefix(outputCount)) }
+            if consumed == 0, !completedFrame { throw RolloutReadError.invalidCompression }
+        }
     }
 }

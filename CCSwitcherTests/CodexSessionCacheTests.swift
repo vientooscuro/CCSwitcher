@@ -1,10 +1,211 @@
 import XCTest
 @testable import CCSwitcher
 
-/// `CodexSessionCache.mergedTokensByDayAndModel` is a pure static function, so
-/// these tests exercise it directly with parsed fixtures and hand-built
-/// aggregates instead of touching the on-disk cache.
+/// Exercises cache reconciliation and aggregate deduplication.
 final class CodexSessionCacheTests: XCTestCase {
+
+    private struct CacheEnvelope: Codable {
+        let version: Int
+        let files: [String: CodexRolloutAggregate]
+    }
+
+    private func writeCache(_ url: URL, version: Int = 8, files: [String: CodexRolloutAggregate]) throws {
+        try JSONEncoder().encode(CacheEnvelope(version: version, files: files)).write(to: url)
+    }
+
+    private func writeRollout(_ url: URL, id: String) throws -> Double {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "{\"type\":\"session_meta\",\"payload\":{\"id\":\"\(id)\"}}\n"
+            .write(to: url, atomically: true, encoding: .utf8)
+        return try XCTUnwrap(url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate).timeIntervalSince1970
+    }
+
+    func testProfileCacheSeedsOnlyItsRootsAndReconcilesChangedAndDeletedFiles() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let sessions = home.appendingPathComponent("profile/sessions")
+        let archive = home.appendingPathComponent("profile/archived_sessions")
+        let sibling = home.appendingPathComponent("profile/sessions-other")
+        let other = home.appendingPathComponent("other/sessions")
+        let unchanged = sessions.appendingPathComponent("rollout-unchanged.jsonl")
+        let changed = archive.appendingPathComponent("rollout-changed.jsonl")
+        let deleted = sessions.appendingPathComponent("rollout-deleted.jsonl")
+        let siblingFile = sibling.appendingPathComponent("rollout-sibling.jsonl")
+        let otherFile = other.appendingPathComponent("rollout-other.jsonl")
+        let unchangedMtime = try writeRollout(unchanged, id: "disk-unchanged")
+        let changedMtime = try writeRollout(changed, id: "disk-changed")
+        let siblingMtime = try writeRollout(siblingFile, id: "sibling")
+        let otherMtime = try writeRollout(otherFile, id: "other")
+        let outsideLink = sessions.appendingPathComponent("rollout-link.jsonl")
+        try FileManager.default.createSymbolicLink(at: outsideLink, withDestinationURL: otherFile)
+        let sharedURL = home.appendingPathComponent("all.json")
+        let profileURL = home.appendingPathComponent("profile.json")
+        try writeCache(sharedURL, files: [
+            unchanged.path: CodexRolloutAggregate(sessionId: "cached-unchanged", mtime: unchangedMtime),
+            changed.path: CodexRolloutAggregate(sessionId: "stale", mtime: changedMtime - 1),
+            deleted.path: CodexRolloutAggregate(sessionId: "deleted", mtime: 1),
+            siblingFile.path: CodexRolloutAggregate(sessionId: "sibling", mtime: siblingMtime),
+            otherFile.path: CodexRolloutAggregate(sessionId: "other", mtime: otherMtime),
+            outsideLink.path: CodexRolloutAggregate(sessionId: "outside-link", mtime: otherMtime),
+        ])
+        let cache = CodexSessionCache(sessionRoots: [sessions.path, archive.path], cacheURL: profileURL, seedCacheURL: sharedURL)
+        _ = await cache.costSeries()
+        let seededCount = await cache.residentFileCount()
+        XCTAssertEqual(seededCount, 3)
+        await cache.refreshFromFilesystem()
+        let saved = try JSONDecoder().decode(CacheEnvelope.self, from: Data(contentsOf: profileURL))
+        XCTAssertEqual(Set(saved.files.keys), Set([unchanged.resolvingSymlinksInPath().path, changed.resolvingSymlinksInPath().path]))
+        XCTAssertEqual(saved.files[unchanged.resolvingSymlinksInPath().path]?.sessionId, "cached-unchanged")
+        XCTAssertEqual(saved.files[changed.resolvingSymlinksInPath().path]?.sessionId, "disk-changed")
+    }
+
+    func testIncompatibleProfileCacheSeedsFromCompatibleSharedCache() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let sessions = home.appendingPathComponent("sessions")
+        let file = sessions.appendingPathComponent("rollout-one.jsonl")
+        let mtime = try writeRollout(file, id: "disk")
+        let sharedURL = home.appendingPathComponent("all.json")
+        let profileURL = home.appendingPathComponent("profile.json")
+        try writeCache(sharedURL, files: [file.path: CodexRolloutAggregate(sessionId: "shared", mtime: mtime)])
+        try writeCache(profileURL, version: 7, files: [file.path: CodexRolloutAggregate(sessionId: "old", mtime: mtime)])
+        let cache = CodexSessionCache(sessionRoots: [sessions.path], cacheURL: profileURL, seedCacheURL: sharedURL)
+        await cache.refreshFromFilesystem()
+        let saved = try JSONDecoder().decode(CacheEnvelope.self, from: Data(contentsOf: profileURL))
+        XCTAssertEqual(saved.files[file.resolvingSymlinksInPath().path]?.sessionId, "shared")
+    }
+
+    func testIncompatibleSharedCacheFallsBackToParsingAndValidProfileTakesPrecedence() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let sessions = home.appendingPathComponent("sessions")
+        let file = sessions.appendingPathComponent("rollout-one.jsonl")
+        let mtime = try writeRollout(file, id: "disk")
+        let sharedURL = home.appendingPathComponent("all.json")
+        let profileURL = home.appendingPathComponent("profile.json")
+        try writeCache(sharedURL, version: 7, files: [file.path: CodexRolloutAggregate(sessionId: "invalid", mtime: mtime)])
+        let cold = CodexSessionCache(sessionRoots: [sessions.path], cacheURL: profileURL, seedCacheURL: sharedURL)
+        await cold.refreshFromFilesystem()
+        var saved = try JSONDecoder().decode(CacheEnvelope.self, from: Data(contentsOf: profileURL))
+        XCTAssertEqual(saved.files[file.resolvingSymlinksInPath().path]?.sessionId, "disk")
+
+        try writeCache(sharedURL, files: [file.path: CodexRolloutAggregate(sessionId: "shared", mtime: mtime)])
+        try writeCache(profileURL, files: [file.path: CodexRolloutAggregate(sessionId: "profile", mtime: mtime)])
+        let warm = CodexSessionCache(sessionRoots: [sessions.path], cacheURL: profileURL, seedCacheURL: sharedURL)
+        await warm.refreshFromFilesystem()
+        saved = try JSONDecoder().decode(CacheEnvelope.self, from: Data(contentsOf: profileURL))
+        XCTAssertEqual(saved.files[file.resolvingSymlinksInPath().path]?.sessionId, "profile")
+    }
+
+    func testCompressedRolloutIsParsedReusedAndRemoved() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let file = home.appendingPathComponent("rollout-one.jsonl.zst")
+        let cacheURL = home.appendingPathComponent("cache.json")
+        let compressed = try XCTUnwrap(Data(base64Encoded: "KLUv/QRYsQEAeyJ0eXBlIjoic2Vzc2lvbl9tZXRhIiwicGF5bG9hZCI6eyJpZCI6ImNvbXByZXNzZWQifX0KiRayvg=="))
+        try compressed.write(to: file)
+        let cache = CodexSessionCache(sessionRoots: [home.path], cacheURL: cacheURL)
+        let firstOK = await cache.refreshFromFilesystem(selection: .compressed)
+        XCTAssertTrue(firstOK)
+        var saved = try JSONDecoder().decode(CacheEnvelope.self, from: Data(contentsOf: cacheURL))
+        XCTAssertEqual(saved.files[file.resolvingSymlinksInPath().path]?.sessionId, "compressed")
+
+        let mtime = try XCTUnwrap(saved.files[file.resolvingSymlinksInPath().path]?.mtime)
+        try writeCache(cacheURL, files: [file.path: CodexRolloutAggregate(sessionId: "reused", mtime: mtime)])
+        await cache.releaseResidentData()
+        let secondOK = await cache.refreshFromFilesystem(selection: .compressed)
+        XCTAssertTrue(secondOK)
+        saved = try JSONDecoder().decode(CacheEnvelope.self, from: Data(contentsOf: cacheURL))
+        XCTAssertEqual(saved.files[file.resolvingSymlinksInPath().path]?.sessionId, "reused")
+
+        let updated = try XCTUnwrap(Data(base64Encoded: "KLUv/QRYmQEAeyJ0eXBlIjoic2Vzc2lvbl9tZXRhIiwicGF5bG9hZCI6eyJpZCI6InVwZGF0ZWQifX0KtRynFQ=="))
+        try updated.write(to: file)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: mtime + 10)], ofItemAtPath: file.path)
+        let changedOK = await cache.refreshFromFilesystem(selection: .compressed)
+        XCTAssertTrue(changedOK)
+        saved = try JSONDecoder().decode(CacheEnvelope.self, from: Data(contentsOf: cacheURL))
+        XCTAssertEqual(saved.files[file.resolvingSymlinksInPath().path]?.sessionId, "updated")
+        try FileManager.default.removeItem(at: file)
+        let deletedOK = await cache.refreshFromFilesystem(selection: .compressed)
+        XCTAssertTrue(deletedOK)
+        saved = try JSONDecoder().decode(CacheEnvelope.self, from: Data(contentsOf: cacheURL))
+        XCTAssertNil(saved.files[file.resolvingSymlinksInPath().path])
+    }
+
+    func testCorruptChangedCompressedRolloutMakesRefreshIncompleteAndDropsStaleAggregate() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let file = home.appendingPathComponent("rollout-one.jsonl.zst")
+        try Data([0, 1, 2, 3]).write(to: file)
+        let cacheURL = home.appendingPathComponent("cache.json")
+        try writeCache(cacheURL, files: [file.path: CodexRolloutAggregate(sessionId: "stale", mtime: 1)])
+        let cache = CodexSessionCache(sessionRoots: [home.path], cacheURL: cacheURL)
+        let complete = await cache.refreshFromFilesystem(selection: .compressed)
+        XCTAssertFalse(complete)
+        let saved = try JSONDecoder().decode(CacheEnvelope.self, from: Data(contentsOf: cacheURL))
+        XCTAssertNil(saved.files[file.resolvingSymlinksInPath().path])
+    }
+
+    func testCompressedCheckpointSurvivesCancellationAndResumesWithoutReparsing() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let sessions = home.appendingPathComponent("sessions")
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let compressed = try XCTUnwrap(Data(base64Encoded: "KLUv/QRYsQEAeyJ0eXBlIjoic2Vzc2lvbl9tZXRhIiwicGF5bG9hZCI6eyJpZCI6ImNvbXByZXNzZWQifX0KiRayvg=="))
+        for index in 0..<101 {
+            try compressed.write(to: sessions.appendingPathComponent("rollout-\(index).jsonl.zst"))
+        }
+        let cacheURL = home.appendingPathComponent("cache.json")
+        let cache = CodexSessionCache(sessionRoots: [sessions.path], cacheURL: cacheURL)
+        let cancelled = await Task {
+            await cache.refreshFromFilesystem(selection: .compressed, progress: { processed, _ in
+                if processed == 100 { withUnsafeCurrentTask { $0?.cancel() } }
+            })
+        }.value
+        XCTAssertFalse(cancelled)
+        let checkpoint = try JSONDecoder().decode(CacheEnvelope.self, from: Data(contentsOf: cacheURL))
+        XCTAssertEqual(checkpoint.files.count, 100)
+
+        let cachedPath = try XCTUnwrap(checkpoint.files.keys.first)
+        var cachedFiles = checkpoint.files
+        cachedFiles[cachedPath]?.sessionId = "reused-checkpoint"
+        try writeCache(cacheURL, files: cachedFiles)
+        let resumed = CodexSessionCache(sessionRoots: [sessions.path], cacheURL: cacheURL)
+        let complete = await resumed.refreshFromFilesystem(selection: .compressed)
+        XCTAssertTrue(complete)
+        let saved = try JSONDecoder().decode(CacheEnvelope.self, from: Data(contentsOf: cacheURL))
+        XCTAssertEqual(saved.files.count, 101)
+        XCTAssertEqual(saved.files[cachedPath]?.sessionId, "reused-checkpoint")
+    }
+
+    func testPlainAndCompressedCopiesDoNotDoubleCountOrIncludeOtherProfile() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let sessions = home.appendingPathComponent("profile/sessions")
+        let archive = home.appendingPathComponent("profile/archived_sessions")
+        let other = home.appendingPathComponent("other/sessions")
+        for root in [sessions, archive, other] {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        }
+        let text = """
+        {"type":"session_meta","payload":{"id":"one"}}
+        {"type":"turn_context","payload":{"turn_id":"turn","model":"gpt-5.4"}}
+        {"type":"token_usage_record","payload":{"thread_id":"one","turn_id":"turn","response_id":"resp_1","usage":{"input_tokens":1000,"cached_input_tokens":800,"output_tokens":50,"reasoning_output_tokens":10,"total_tokens":1050}}}
+        {"timestamp":"2026-11-10T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":800,"output_tokens":50},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":800,"output_tokens":50}}}}
+        """
+        try text.write(to: sessions.appendingPathComponent("rollout-one.jsonl"), atomically: true, encoding: .utf8)
+        let compressed = try XCTUnwrap(Data(base64Encoded: "KLUv/QRY1QcAcs8sH1Bp2wZIBmyyn0T+jMXP/oZlJjO96suGknP4ZKY2pgeF1hqn5KbhAn0NFLl567IGHqxgayKkecEdukN3CO4YzjEIHO5w9KWk5lSQdogk9fbNHTwU0eWU7OYQvezN3QCqTBjJuLm7g87Yy9KbH1ycLFl3cTKDKiVLtGJrJMM8Ei+oebABAAhDr+PoSapVbq5s6U7I1jVQ2dKF1p66R1fIF+gqbaJI6+apU0FdhDn56LkU/UUZAJcFAn5zq9iGXnnw7kyDoBjoWz9pWvJUdowwGAdQnbrJcT5ysSgq/AtXaAcpxmJ4ZrBi/0NelCD7KoGeFwAyXWqqDBWqG+w="))
+        try compressed.write(to: archive.appendingPathComponent("rollout-one.jsonl.zst"))
+        try text.replacingOccurrences(of: "resp_1", with: "resp_other")
+            .write(to: other.appendingPathComponent("rollout-other.jsonl"), atomically: true, encoding: .utf8)
+        let cache = CodexSessionCache(sessionRoots: [sessions.path, archive.path], cacheURL: home.appendingPathComponent("profile.json"))
+        let complete = await cache.refreshFromFilesystem()
+        XCTAssertTrue(complete)
+        let series = await cache.costSeries()
+        XCTAssertEqual(series.daily.first?.totalTokens, 1050)
+    }
 
     func testConfirmedRequestsDeduplicateAcrossForksWithoutMergingDistinctResponses() throws {
         func parse(session: String, turn: String, response: String, timestamp: String, model: String) throws -> CodexRolloutAggregate {

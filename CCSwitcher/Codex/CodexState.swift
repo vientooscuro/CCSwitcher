@@ -7,6 +7,10 @@ enum CodexStatisticsScope: String {
     case currentAccount
 }
 
+enum CodexStatisticsCompleteness {
+    case loading, partial, complete
+}
+
 /// Desktop accounts keep independent live credentials; snapshots are never restored.
 @MainActor
 final class CodexState: ObservableObject, ProviderSurface {
@@ -37,7 +41,10 @@ final class CodexState: ObservableObject, ProviderSurface {
         }
     }
     @Published private(set) var isStatisticsLoading = false
+    @Published private(set) var statisticsCompleteness: CodexStatisticsCompleteness = .loading
+    @Published private(set) var statisticsArchiveProgress: (processed: Int, total: Int)?
     private var statisticsGeneration = UUID()
+    private var statisticsArchiveTask: Task<Void, Never>?
     private var lastStatisticsSnapshotAt: Date?
     private var statisticsWaiters: [CheckedContinuation<Void, Never>] = []
     private var accountRefreshWaiters: [CheckedContinuation<Void, Never>] = []
@@ -304,12 +311,16 @@ final class CodexState: ObservableObject, ProviderSurface {
     }
 
     private func invalidateStatistics() {
+        statisticsArchiveTask?.cancel()
+        statisticsArchiveTask = nil
         statisticsGeneration = UUID()
         costSeries = .empty
         activitySummary = .empty
         hasStatisticsSnapshot = false
         lastStatisticsSnapshotAt = nil
         isStatisticsLoading = false
+        statisticsCompleteness = .loading
+        statisticsArchiveProgress = nil
         resumeStatisticsWaiters()
     }
 
@@ -326,16 +337,13 @@ final class CodexState: ObservableObject, ProviderSurface {
         }
         let statisticsStartedAt = Date()
         guard let generation = beginStatisticsRefreshIfIdle() else { return }
-        defer {
-            finishStatisticsRefresh(generation: generation)
-        }
         let profile = selectedProfile
         let scope = statisticsScope
         let homes = scope == .allProfiles ? profiles.statisticsHomes : [profile.home]
         let roots = homes.flatMap { home in
             [home.appendingPathComponent("sessions").path, home.appendingPathComponent("archived_sessions").path]
         }.sorted()
-        let key = roots.joined(separator: "\n")
+        let key = "\(scope == .allProfiles ? "all" : "current")\n" + roots.joined(separator: "\n")
         let sessionCache: CodexSessionCache
         if let cached = profileSessionCaches[key] {
             sessionCache = cached
@@ -343,23 +351,58 @@ final class CodexState: ObservableObject, ProviderSurface {
             let cacheURL = scope == .allProfiles
                 ? profiles.defaultProfile.home.appendingPathComponent("ccswitcher-all-session-cache.json")
                 : profile.home.appendingPathComponent("ccswitcher-session-cache.json")
+            let seedCacheURL = scope == .currentAccount
+                ? profiles.defaultProfile.home.appendingPathComponent("ccswitcher-all-session-cache.json")
+                : nil
             sessionCache = CodexSessionCache(
-                sessionRoots: roots, cacheURL: cacheURL
+                sessionRoots: roots, cacheURL: cacheURL, seedCacheURL: seedCacheURL
             )
             profileSessionCaches[key] = sessionCache
         }
         await PricingService.shared.reloadIfFreshChanged()
         PricingService.shared.refreshInBackground()
-        await sessionCache.refreshFromFilesystem()
-        let cost = await sessionCache.costSeries()
-        let activity = await sessionCache.activityToday()
-        await sessionCache.releaseResidentData()
+        let uncompressedOK = await sessionCache.refreshFromFilesystem(selection: .uncompressed)
+        let cost = await sessionCache.costSeries(selection: .uncompressed)
+        let activity = await sessionCache.activityToday(selection: .uncompressed)
         guard statisticsGeneration == generation, statisticsScope == scope, selectedProfile == profile else { return }
         costSeries = cost
         activitySummary = activity
-        finishStatisticsRefresh(generation: generation, snapshotAt: statisticsStartedAt)
+        hasStatisticsSnapshot = true
+        statisticsCompleteness = .partial
         if notify { didRefresh?() }
-        log.info("[refresh] today=$\(String(format: "%.2f", costSeries.todayCost)) turns=\(activitySummary.turns)")
+        statisticsArchiveProgress = (0, 0)
+        statisticsArchiveTask = Task { [weak self] in
+            let archiveOK = await sessionCache.refreshFromFilesystem(selection: .compressed, progress: { [weak self] processed, total in
+                Task { @MainActor [weak self] in
+                    guard let self, self.statisticsGeneration == generation else { return }
+                    self.statisticsArchiveProgress = (processed, total)
+                }
+            }, snapshot: { [weak self] in
+                guard !Task.isCancelled else { return }
+                let cost = await sessionCache.costSeries()
+                let activity = await sessionCache.activityToday()
+                await MainActor.run { [weak self] in
+                    guard let self, self.statisticsGeneration == generation,
+                          self.statisticsScope == scope, self.selectedProfile == profile else { return }
+                    self.costSeries = cost
+                    self.activitySummary = activity
+                    self.didRefresh?()
+                }
+            })
+            guard !Task.isCancelled else { return }
+            let fullCost = await sessionCache.costSeries()
+            let fullActivity = await sessionCache.activityToday()
+            await sessionCache.releaseResidentData()
+            guard let self, self.statisticsGeneration == generation,
+                  self.statisticsScope == scope, self.selectedProfile == profile else { return }
+            self.costSeries = fullCost
+            self.activitySummary = fullActivity
+            self.statisticsCompleteness = uncompressedOK && archiveOK ? .complete : .partial
+            self.finishStatisticsRefresh(generation: generation, snapshotAt: statisticsStartedAt)
+            self.statisticsArchiveTask = nil
+            self.didRefresh?()
+            log.info("[refresh] today=$\(String(format: "%.2f", fullCost.todayCost)) turns=\(fullActivity.turns)")
+        }
     }
 
     func beginStatisticsRefreshIfIdle() -> UUID? {

@@ -24,11 +24,32 @@ struct CostDetailView: View {
                     .pickerStyle(.segmented)
                     .padding(.horizontal, 16)
                 }
-                if (hub.surface as? CodexState)?.isStatisticsLoading == true {
+                if (hub.surface as? CodexState)?.statisticsCompleteness == .loading {
                     ProgressView("Rebuilding Codex history…")
                         .font(.caption)
                         .padding()
                 } else {
+                    if (hub.surface as? CodexState)?.statisticsCompleteness == .partial {
+                        HStack(alignment: .top, spacing: 8) {
+                            if let codex = hub.surface as? CodexState, codex.isStatisticsLoading {
+                                ProgressView().controlSize(.small)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Reading archived sessions. Totals are incomplete until processing finishes.")
+                                    if let progress = codex.statisticsArchiveProgress, progress.total > 0 {
+                                        Text("\(progress.processed) of \(progress.total) files")
+                                            .monospacedDigit()
+                                    }
+                                }
+                            } else {
+                                Image(systemName: "exclamationmark.triangle")
+                                Text("Some session files could not be read. Totals are incomplete.")
+                            }
+                        }
+                        .font(.caption)
+                        .foregroundStyle(theme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 16)
+                    }
                     todayCard
                     periodSummaryCards
                     dailyHistorySection

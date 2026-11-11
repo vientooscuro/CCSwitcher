@@ -2,6 +2,41 @@ import XCTest
 @testable import CCSwitcher
 
 final class CodexRolloutParserTests: XCTestCase {
+    func testCompressedMultiframeFixtureMatchesPlainHistory() throws {
+        let bundle = Bundle(for: Self.self)
+        let url = try XCTUnwrap(
+            bundle.url(forResource: "codex-rollout-zstd", withExtension: "fixture", subdirectory: "Fixtures")
+            ?? bundle.url(forResource: "codex-rollout-zstd", withExtension: "fixture")
+        )
+        let compressed = try XCTUnwrap(CodexRolloutParser.parse(contentsOf: url.path, relativePath: "codex-rollout.jsonl.zst", mtime: 1))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        XCTAssertEqual(try encoder.encode(compressed), try encoder.encode(parseFixture()))
+    }
+
+    func testTruncatedCompressedFixtureReturnsNil() throws {
+        let bundle = Bundle(for: Self.self)
+        let fixture = try XCTUnwrap(
+            bundle.url(forResource: "codex-rollout-zstd", withExtension: "fixture", subdirectory: "Fixtures")
+            ?? bundle.url(forResource: "codex-rollout-zstd", withExtension: "fixture")
+        )
+        let compressed = try Data(contentsOf: fixture)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".jsonl.zst")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try compressed.dropLast().write(to: url)
+        XCTAssertNil(CodexRolloutParser.parse(contentsOf: url.path, relativePath: "corrupt.jsonl.zst", mtime: 1))
+    }
+
+    func testCompressedLineSpanningMultipleOutputBlocks() throws {
+        let bundle = Bundle(for: Self.self)
+        let fixture = try XCTUnwrap(
+            bundle.url(forResource: "codex-long-line-zstd", withExtension: "fixture", subdirectory: "Fixtures")
+            ?? bundle.url(forResource: "codex-long-line-zstd", withExtension: "fixture")
+        )
+        let aggregate = try XCTUnwrap(CodexRolloutParser.parse(contentsOf: fixture.path, relativePath: "long.jsonl.zst", mtime: 1))
+        XCTAssertEqual(aggregate.sessionId, "large-line")
+    }
+
     func testConfirmedFirstRequestIsCountedWhenCumulativeIncludesEarlierUsage() throws {
         let text = """
         {"type":"session_meta","payload":{"id":"session"}}
