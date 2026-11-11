@@ -27,6 +27,12 @@ jobs:
       HAS_SPARKLE_KEY: ${{ secrets.SPARKLE_EDDSA_KEY != '' }}
 
     steps:
+      - name: Require release signing credentials
+        if: startsWith(github.ref, 'refs/tags/v') && (env.HAS_APPLE_SECRETS != 'true' || env.HAS_SPARKLE_KEY != 'true')
+        run: |
+          echo "Release signing and Sparkle credentials are required."
+          exit 1
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
